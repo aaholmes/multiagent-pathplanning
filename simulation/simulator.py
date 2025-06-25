@@ -116,31 +116,41 @@ class Simulator:
         if len(path) < 2:
             return navigation_core.Vector2D(0.0, 0.0)
         
-        # Find the next waypoint
+        # Find the next waypoint to target
         current_pos = agent.position
-        min_distance = float('inf')
-        target_idx = len(path) - 1  # Default to goal
+        target_idx = 0
         
+        # Find the closest waypoint on the path
+        min_distance = float('inf')
+        closest_idx = 0
         for i, waypoint in enumerate(path):
             distance = current_pos.distance(waypoint)
             if distance < min_distance:
                 min_distance = distance
-                # Look ahead to next waypoint if we're close to current one
-                if distance < 1.0 and i + 1 < len(path):
-                    target_idx = i + 1
-                else:
-                    target_idx = i
-                break
+                closest_idx = i
+        
+        # Target the next waypoint ahead, or the goal if we're close to the closest point
+        if min_distance < 1.5:  # If we're close to a waypoint
+            target_idx = min(closest_idx + 1, len(path) - 1)  # Move to next waypoint
+        else:
+            target_idx = closest_idx  # Head to closest waypoint
         
         target = path[target_idx]
         direction = target - current_pos
         
-        if direction.magnitude() < 0.1:
-            # Very close to target, stop
-            return navigation_core.Vector2D(0.0, 0.0)
+        if direction.magnitude() < 0.2:
+            # Very close to target, look further ahead or stop if at goal
+            if target_idx < len(path) - 1:
+                # Not at goal yet, target next waypoint
+                target = path[target_idx + 1]
+                direction = target - current_pos
+            else:
+                # At final goal, stop
+                return navigation_core.Vector2D(0.0, 0.0)
         
-        # Normalize and scale by max speed
-        return direction.normalize() * agent.max_speed
+        # Normalize and scale by preferred speed (slightly less than max for smooth motion)
+        preferred_speed = agent.max_speed * 0.8
+        return direction.normalize() * preferred_speed
     
     def _get_neighbors(self, agent: navigation_core.AgentState, all_agents: List[navigation_core.AgentState]) -> List[navigation_core.AgentState]:
         """Get neighboring agents within sensing range."""
@@ -204,14 +214,14 @@ class Simulator:
         print(f"Starting simulation (max_steps={max_steps}, dt={self.dt})")
         
         while steps < max_steps and state.time < self.max_time:
-            # Check if all agents reached their goals
-            if self._all_agents_at_goal(state):
-                print(f"All agents reached their goals at time {state.time:.2f}")
-                break
-            
             # Perform simulation step
             state = self.step(state)
             steps += 1
+            
+            # Check if all agents reached their goals (but don't exit early unless we're sure)
+            if steps > 50 and self._all_agents_at_goal(state):  # Give some time before checking
+                print(f"All agents reached their goals at time {state.time:.2f}")
+                break
             
             # Call step callback if provided
             if self.step_callback:
@@ -224,8 +234,11 @@ class Simulator:
         print(f"Simulation completed: {steps} steps, {state.time:.2f} time units")
         return state
     
-    def _all_agents_at_goal(self, state: SimulationState, tolerance: float = 0.5) -> bool:
+    def _all_agents_at_goal(self, state: SimulationState, tolerance: float = 1.0) -> bool:
         """Check if all agents have reached their goals."""
+        agents_at_goal = 0
+        total_agents = len(state.agents)
+        
         for agent in state.agents:
             # Find corresponding task
             task = None
@@ -238,10 +251,11 @@ class Simulator:
                 continue
             
             distance_to_goal = agent.position.distance(task.goal)
-            if distance_to_goal > tolerance:
-                return False
+            if distance_to_goal <= tolerance:
+                agents_at_goal += 1
         
-        return True
+        # Only return True if ALL agents are at their goals
+        return agents_at_goal == total_agents
     
     def get_statistics(self, state: SimulationState) -> Dict:
         """Compute simulation statistics."""

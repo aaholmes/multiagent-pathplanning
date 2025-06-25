@@ -11,8 +11,8 @@ pub struct ORCASimulator {
 impl ORCASimulator {
     pub fn new() -> Self {
         ORCASimulator {
-            time_horizon: 2.0,
-            neighbor_distance: 10.0,
+            time_horizon: 1.5,
+            neighbor_distance: 8.0,
             max_neighbors: 10,
         }
     }
