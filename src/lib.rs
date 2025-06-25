@@ -5,10 +5,12 @@ mod structs;
 mod astar;
 mod cbs;
 mod orca;
+mod orca_correct;
 
 use structs::*;
 use cbs::solve_cbs;
 use orca::compute_orca_velocity;
+use orca_correct::compute_new_velocity as compute_orca_correct;
 
 #[pyfunction]
 fn solve_cbs_py(grid: Grid, tasks: Vec<Task>) -> PyResult<Option<HashMap<usize, Vec<Point>>>> {
@@ -23,7 +25,7 @@ fn compute_orca_velocity_py(
     time_horizon: f64,
 ) -> PyResult<Vector2D> {
     let neighbor_refs: Vec<&AgentState> = neighbors.iter().collect();
-    let result = compute_orca_velocity(agent, &neighbor_refs, time_horizon);
+    let result = compute_orca_correct(agent, &neighbor_refs, time_horizon);
     Ok(result)
 }
 
