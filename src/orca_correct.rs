@@ -1,5 +1,5 @@
 use crate::structs::{AgentState, Vector2D};
-use good_lp::*;
+use osqp::{CscMatrix, Problem, Settings};
 
 const EPSILON: f64 = 1e-10;
 
@@ -34,8 +34,8 @@ pub fn compute_new_velocity(
         }
     }
     
-    // Step 2: Attempt to solve 2D linear program (feasible case)
-    if let Some(new_velocity) = solve_2d_linear_program(&orca_lines, agent.max_speed, &agent.pref_velocity) {
+    // Step 2: Attempt to solve 2D quadratic program (feasible case)
+    if let Some(new_velocity) = solve_2d_quadratic_program(&orca_lines, agent.max_speed, &agent.pref_velocity) {
         return new_velocity;
     }
     
@@ -69,33 +69,30 @@ fn compute_orca_line_for_agent(
     let closest_point = find_closest_point_on_vo_boundary(relative_velocity, vo_center, vo_radius);
     
     // Calculate correction vector
-    let u = closest_point - relative_velocity;
+    let mut u = closest_point - relative_velocity;
     
-    // Check if correction vector is meaningful
+    // --- SYMMETRY-BREAKING PERTURBATION ---
+    // Handle the deadlock/perfect symmetry case where u becomes zero
     if u.magnitude() < EPSILON {
-        // Special case: relative velocity is exactly on VO boundary
-        let distance_to_vo_center = (relative_velocity - vo_center).magnitude();
-        if (distance_to_vo_center - vo_radius).abs() < EPSILON {
-            // We're on the boundary - still need a constraint for grazing collision
-            let center_to_rel_vel = relative_velocity - vo_center;
-            if center_to_rel_vel.magnitude() < EPSILON {
-                // Relative velocity at VO center - use arbitrary direction
-                let orca_direction = Vector2D::new(1.0, 0.0);
-                let orca_point = agent.velocity; // No correction needed, just constrain direction
-                return Some(OrcaLine::new(orca_point, orca_direction));
-            } else {
-                // On boundary - constraint should push away from VO center
-                let orca_direction = center_to_rel_vel.normalize();
-                let orca_point = agent.velocity; // No correction needed
-                return Some(OrcaLine::new(orca_point, orca_direction));
-            }
+        // This is the deadlock case - relative velocity lies on VO boundary
+        // Introduce a small, deterministic perturbation to break symmetry
+        
+        let perturb_dir = if agent.pref_velocity.magnitude() > EPSILON {
+            // Use direction perpendicular to agent's preferred velocity
+            Vector2D::new(-agent.pref_velocity.y, agent.pref_velocity.x).normalize()
+        } else if agent.velocity.magnitude() > EPSILON {
+            // Fallback: perpendicular to current velocity
+            Vector2D::new(-agent.velocity.y, agent.velocity.x).normalize()
         } else {
-            // Truly safe case
-            return None;
-        }
+            // Final fallback: arbitrary perpendicular direction
+            Vector2D::new(0.0, 1.0)
+        };
+        
+        // Apply more significant perturbation - this breaks perfect symmetry
+        u = perturb_dir * 0.001; // Larger perturbation to ensure constraint generation
     }
     
-    // Normal case: meaningful correction vector
+    // Normal case: construct ORCA line with correction vector
     let orca_direction = u.normalize();
     let orca_point = agent.velocity + u * 0.5;
     
@@ -198,122 +195,142 @@ fn project_point_onto_ray(point: Vector2D, ray_origin: Vector2D, ray_direction: 
     }
 }
 
-/// Helper function to handle the non-linear speed constraint
-fn create_speed_constraint_polygon(max_speed: f64) -> Vec<(f64, f64, f64)> {
-    let mut constraints = Vec::new();
-    let num_sides = 16; // Approximate the circle with a 16-sided polygon
-    for i in 0..num_sides {
-        let angle = (i as f64 / num_sides as f64) * 2.0 * std::f64::consts::PI;
-        let dir_x = angle.cos();
-        let dir_y = angle.sin();
-        // Constraint: v · dir <= max_speed
-        // In the form ax + by <= c: dir_x * vx + dir_y * vy <= max_speed
-        constraints.push((dir_x, dir_y, max_speed));
-    }
-    constraints
-}
 
-/// Solves 2D linear program to find optimal velocity
-fn solve_2d_linear_program(
+
+/// Solves 2D quadratic program to find optimal velocity using L2 distance
+/// Objective: Minimize ||v - pref_velocity||^2 = (vx - pvx)^2 + (vy - pvy)^2
+/// Uses OSQP quadratic programming solver for true L2 optimization
+fn solve_2d_quadratic_program(
     orca_lines: &[OrcaLine],
     max_speed: f64,
     pref_velocity: &Vector2D,
 ) -> Option<Vector2D> {
-    use good_lp::*;
+    // Define the QP Problem in OSQP format
     
-    // Create variables for velocity components
-    variables! {
-        vars:
-            -10000.0 <= vx <= 10000.0;
-            -10000.0 <= vy <= 10000.0;
-            0.0 <= dx_pos;
-            0.0 <= dx_neg;
-            0.0 <= dy_pos;
-            0.0 <= dy_neg;
-    }
+    // q vector (linear term) for minimizing ||v - pref_velocity||^2
+    let q = &[-2.0 * pref_velocity.x, -2.0 * pref_velocity.y];
     
-    // Build the problem: minimize L1 distance to preferred velocity
-    let mut problem = vars
-        .minimise(dx_pos + dx_neg + dy_pos + dy_neg)
-        .using(default_solver)
-        .with(constraint!(vx - dx_pos + dx_neg == pref_velocity.x))
-        .with(constraint!(vy - dy_pos + dy_neg == pref_velocity.y));
+    // Define the Linear Constraints in the form l <= Ax <= u
+    let mut constraints_a: Vec<[f64; 2]> = Vec::new();
+    let mut l_bounds = Vec::new();
+    let mut u_bounds = Vec::new();
     
-    // Add ORCA Line Constraints: (v - p) · d >= 0  =>  v·d >= p·d
+    // Add ORCA constraints: v·d >= p·d
     for line in orca_lines {
-        let rhs = line.point.x * line.direction.x + line.point.y * line.direction.y;
-        problem = problem.with(constraint!(
-            vx * line.direction.x + vy * line.direction.y >= rhs
-        ));
+        constraints_a.push([line.direction.x, line.direction.y]);
+        l_bounds.push(line.point.dot(&line.direction));
+        u_bounds.push(f64::INFINITY);
     }
     
-    // Add Speed Constraint: ||v|| <= max_speed (approximated as polygon)
-    let speed_constraints = create_speed_constraint_polygon(max_speed);
-    for (dir_x, dir_y, max_val) in speed_constraints {
-        problem = problem.with(constraint!(
-            vx * dir_x + vy * dir_y <= max_val
-        ));
+    // Add speed constraints using polygonal approximation
+    let num_sides = 16;
+    for i in 0..num_sides {
+        let angle = (i as f64 / num_sides as f64) * 2.0 * std::f64::consts::PI;
+        let dir = Vector2D::new(angle.cos(), angle.sin());
+        constraints_a.push([dir.x, dir.y]);
+        l_bounds.push(f64::NEG_INFINITY);
+        u_bounds.push(max_speed);
     }
     
-    // Solve the problem
-    match problem.solve() {
-        Ok(solution) => {
-            let vx_val = solution.value(vx);
-            let vy_val = solution.value(vy);
-            Some(Vector2D::new(vx_val, vy_val))
-        }
-        Err(_) => {
-            // The problem is infeasible
-            None
+    // Create CSC matrices using dense construction for OSQP v1.0 API
+    let p_matrix = CscMatrix::from_column_iter_dense(
+        2, // rows
+        2, // cols  
+        [2.0, 0.0, 0.0, 2.0].iter().copied(),
+    );
+    
+    // Build A matrix from constraints (row-major)
+    let mut a_dense = Vec::new();
+    for row_data in &constraints_a {
+        a_dense.push(row_data[0]);
+        a_dense.push(row_data[1]);
+    }
+    
+    let a_matrix = CscMatrix::from_row_iter_dense(
+        constraints_a.len(), // rows
+        2, // cols
+        a_dense.iter().copied(),
+    );
+    
+    // Create and Solve the Problem
+    let settings = Settings::default().verbose(false);
+    
+    let mut problem = match Problem::new(p_matrix, q, a_matrix, &l_bounds, &u_bounds, &settings) {
+        Ok(p) => p,
+        Err(_) => return None,
+    };
+    
+    let result = problem.solve();
+    match result {
+        osqp::Status::Solved(solution) => {
+            let sol = solution.x();
+            Some(Vector2D::new(sol[0], sol[1]))
+        },
+        _ => None, // Infeasible or other error
+    }
+}
+
+/// Projects a velocity onto the ORCA constraints and speed limit
+fn project_onto_constraints(
+    velocity: Vector2D,
+    orca_lines: &[OrcaLine],
+    max_speed: f64,
+) -> Vector2D {
+    let mut projected_v = velocity;
+    
+    // Project onto ORCA line constraints
+    for line in orca_lines {
+        let constraint_val = (projected_v - line.point).dot(&line.direction);
+        if constraint_val < 0.0 {
+            // Violates constraint, project onto the line
+            projected_v = projected_v - line.direction * constraint_val;
         }
     }
+    
+    // Project onto speed constraint
+    if projected_v.magnitude() > max_speed {
+        if projected_v.magnitude() > EPSILON {
+            projected_v = projected_v.normalize() * max_speed;
+        } else {
+            projected_v = Vector2D::new(0.0, 0.0);
+        }
+    }
+    
+    projected_v
 }
 
 
 /// Solves 3D linear program for infeasible case (emergency mode)
+/// Uses grid sampling as a fallback when quadratic programming fails
 fn solve_3d_linear_program(orca_lines: &[OrcaLine], max_speed: f64) -> Vector2D {
-    use good_lp::*;
+    // Grid sampling approach for infeasible cases
+    // Sample velocities on the speed circle and find the one with minimum violation
     
-    // Create variables: vx, vy, and d (penetration depth to minimize)
-    variables! {
-        vars:
-            -10000.0 <= vx <= 10000.0;
-            -10000.0 <= vy <= 10000.0;
-            0.0 <= d;
-    }
+    let num_samples = 32;
+    let mut best_velocity = Vector2D::new(0.0, 0.0);
+    let mut min_violation = f64::INFINITY;
     
-    // Objective: Minimize d (the maximum constraint violation)
-    let mut problem = vars.minimise(d).using(default_solver);
-    
-    // Add ORCA Line Constraints: (v - p) · d + d >= 0
-    // This relaxes the constraint by allowing violation d
-    for line in orca_lines {
-        let rhs = line.point.x * line.direction.x + line.point.y * line.direction.y;
-        problem = problem.with(constraint!(
-            vx * line.direction.x + vy * line.direction.y + d >= rhs
-        ));
-    }
-    
-    // Add Speed Constraint: ||v|| <= max_speed (approximated as polygon)
-    let speed_constraints = create_speed_constraint_polygon(max_speed);
-    for (dir_x, dir_y, max_val) in speed_constraints {
-        problem = problem.with(constraint!(
-            vx * dir_x + vy * dir_y <= max_val
-        ));
-    }
-    
-    // This problem should always be feasible since we allow constraint violations
-    match problem.solve() {
-        Ok(solution) => {
-            let vx_val = solution.value(vx);
-            let vy_val = solution.value(vy);
-            Vector2D::new(vx_val, vy_val)
-        }
-        Err(_) => {
-            // Fallback to zero velocity if solver fails
-            Vector2D::new(0.0, 0.0)
+    for i in 0..num_samples {
+        let angle = (i as f64 / num_samples as f64) * 2.0 * std::f64::consts::PI;
+        let candidate = Vector2D::new(
+            max_speed * angle.cos(),
+            max_speed * angle.sin(),
+        );
+        
+        let violation = compute_max_violation(&candidate, orca_lines);
+        if violation < min_violation {
+            min_violation = violation;
+            best_velocity = candidate;
         }
     }
+    
+    // Also try the zero velocity
+    let zero_violation = compute_max_violation(&Vector2D::new(0.0, 0.0), orca_lines);
+    if zero_violation < min_violation {
+        best_velocity = Vector2D::new(0.0, 0.0);
+    }
+    
+    best_velocity
 }
 
 /// Computes maximum constraint violation for a given velocity
@@ -334,6 +351,7 @@ fn compute_max_violation(velocity: &Vector2D, orca_lines: &[OrcaLine]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::structs::Point;
     
     #[test]
     fn test_head_on_collision() {
