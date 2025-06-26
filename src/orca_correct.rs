@@ -1,4 +1,5 @@
-use crate::structs::{AgentState, Vector2D, Point};
+use crate::structs::{AgentState, Vector2D};
+use good_lp::*;
 
 const EPSILON: f64 = 1e-10;
 
@@ -70,14 +71,33 @@ fn compute_orca_line_for_agent(
     // Calculate correction vector
     let u = closest_point - relative_velocity;
     
-    // Degeneracy check: already safe
+    // Check if correction vector is meaningful
     if u.magnitude() < EPSILON {
-        return None;
+        // Special case: relative velocity is exactly on VO boundary
+        let distance_to_vo_center = (relative_velocity - vo_center).magnitude();
+        if (distance_to_vo_center - vo_radius).abs() < EPSILON {
+            // We're on the boundary - still need a constraint for grazing collision
+            let center_to_rel_vel = relative_velocity - vo_center;
+            if center_to_rel_vel.magnitude() < EPSILON {
+                // Relative velocity at VO center - use arbitrary direction
+                let orca_direction = Vector2D::new(1.0, 0.0);
+                let orca_point = agent.velocity; // No correction needed, just constrain direction
+                return Some(OrcaLine::new(orca_point, orca_direction));
+            } else {
+                // On boundary - constraint should push away from VO center
+                let orca_direction = center_to_rel_vel.normalize();
+                let orca_point = agent.velocity; // No correction needed
+                return Some(OrcaLine::new(orca_point, orca_direction));
+            }
+        } else {
+            // Truly safe case
+            return None;
+        }
     }
     
-    // Construct ORCA half-plane (each agent takes half responsibility)
-    let orca_point = agent.velocity + u * 0.5;
+    // Normal case: meaningful correction vector
     let orca_direction = u.normalize();
+    let orca_point = agent.velocity + u * 0.5;
     
     Some(OrcaLine::new(orca_point, orca_direction))
 }
@@ -92,8 +112,8 @@ fn find_closest_point_on_vo_boundary(
     let center_to_point = point - vo_center;
     let distance_to_center = center_to_point.magnitude();
     
-    // Case 1: Point is inside the disk - project to disk boundary
-    if distance_to_center < vo_radius {
+    // Case 1: Point is inside or on the disk boundary - project to disk boundary
+    if distance_to_center <= vo_radius {
         if distance_to_center < EPSILON {
             // Point is at center, choose arbitrary direction
             return vo_center + Vector2D::new(vo_radius, 0.0);
@@ -178,157 +198,122 @@ fn project_point_onto_ray(point: Vector2D, ray_origin: Vector2D, ray_direction: 
     }
 }
 
+/// Helper function to handle the non-linear speed constraint
+fn create_speed_constraint_polygon(max_speed: f64) -> Vec<(f64, f64, f64)> {
+    let mut constraints = Vec::new();
+    let num_sides = 16; // Approximate the circle with a 16-sided polygon
+    for i in 0..num_sides {
+        let angle = (i as f64 / num_sides as f64) * 2.0 * std::f64::consts::PI;
+        let dir_x = angle.cos();
+        let dir_y = angle.sin();
+        // Constraint: v · dir <= max_speed
+        // In the form ax + by <= c: dir_x * vx + dir_y * vy <= max_speed
+        constraints.push((dir_x, dir_y, max_speed));
+    }
+    constraints
+}
+
 /// Solves 2D linear program to find optimal velocity
 fn solve_2d_linear_program(
     orca_lines: &[OrcaLine],
     max_speed: f64,
     pref_velocity: &Vector2D,
 ) -> Option<Vector2D> {
-    // Start with preferred velocity
-    let mut optimal_velocity = *pref_velocity;
+    use good_lp::*;
     
-    // Clip to max speed constraint
-    if optimal_velocity.magnitude() > max_speed {
-        optimal_velocity = optimal_velocity.normalize() * max_speed;
+    // Create variables for velocity components
+    variables! {
+        vars:
+            -10000.0 <= vx <= 10000.0;
+            -10000.0 <= vy <= 10000.0;
+            0.0 <= dx_pos;
+            0.0 <= dx_neg;
+            0.0 <= dy_pos;
+            0.0 <= dy_neg;
     }
     
-    // Apply each ORCA constraint
-    for (i, line) in orca_lines.iter().enumerate() {
-        if violates_constraint(&optimal_velocity, line) {
-            // Project to feasible region
-            if let Some(projected) = project_to_orca_line(
-                line,
-                &optimal_velocity,
-                max_speed,
-                orca_lines,
-                i,
-                pref_velocity,
-            ) {
-                optimal_velocity = projected;
-            } else {
-                // No feasible solution
-                return None;
-            }
+    // Build the problem: minimize L1 distance to preferred velocity
+    let mut problem = vars
+        .minimise(dx_pos + dx_neg + dy_pos + dy_neg)
+        .using(default_solver)
+        .with(constraint!(vx - dx_pos + dx_neg == pref_velocity.x))
+        .with(constraint!(vy - dy_pos + dy_neg == pref_velocity.y));
+    
+    // Add ORCA Line Constraints: (v - p) · d >= 0  =>  v·d >= p·d
+    for line in orca_lines {
+        let rhs = line.point.x * line.direction.x + line.point.y * line.direction.y;
+        problem = problem.with(constraint!(
+            vx * line.direction.x + vy * line.direction.y >= rhs
+        ));
+    }
+    
+    // Add Speed Constraint: ||v|| <= max_speed (approximated as polygon)
+    let speed_constraints = create_speed_constraint_polygon(max_speed);
+    for (dir_x, dir_y, max_val) in speed_constraints {
+        problem = problem.with(constraint!(
+            vx * dir_x + vy * dir_y <= max_val
+        ));
+    }
+    
+    // Solve the problem
+    match problem.solve() {
+        Ok(solution) => {
+            let vx_val = solution.value(vx);
+            let vy_val = solution.value(vy);
+            Some(Vector2D::new(vx_val, vy_val))
+        }
+        Err(_) => {
+            // The problem is infeasible
+            None
         }
     }
-    
-    Some(optimal_velocity)
 }
 
-/// Checks if a velocity violates an ORCA constraint
-fn violates_constraint(velocity: &Vector2D, line: &OrcaLine) -> bool {
-    let relative_velocity = *velocity - line.point;
-    relative_velocity.dot(&line.direction) < -EPSILON
-}
-
-/// Projects velocity to ORCA line while maintaining feasibility
-fn project_to_orca_line(
-    line: &OrcaLine,
-    velocity: &Vector2D,
-    max_speed: f64,
-    orca_lines: &[OrcaLine],
-    line_index: usize,
-    pref_velocity: &Vector2D,
-) -> Option<Vector2D> {
-    // Project velocity onto the ORCA line
-    let relative_velocity = *velocity - line.point;
-    let dot_product = relative_velocity.dot(&line.direction);
-    let projected = line.point + line.direction * dot_product;
-    
-    // Check if projection satisfies speed constraint
-    if projected.magnitude() <= max_speed + EPSILON {
-        // Check if projected velocity satisfies all previous constraints
-        let mut feasible = true;
-        for (i, other_line) in orca_lines.iter().enumerate() {
-            if i < line_index && violates_constraint(&projected, other_line) {
-                feasible = false;
-                break;
-            }
-        }
-        
-        if feasible {
-            return Some(projected);
-        }
-    }
-    
-    // Find intersection with speed circle if needed
-    find_line_circle_intersection(line, max_speed, pref_velocity)
-}
-
-/// Finds intersection of ORCA line with speed circle
-fn find_line_circle_intersection(
-    line: &OrcaLine,
-    max_speed: f64,
-    pref_velocity: &Vector2D,
-) -> Option<Vector2D> {
-    // Solve for intersection of line with circle of radius max_speed centered at origin
-    let h = line.point;
-    let d = line.direction;
-    
-    // Distance from origin to line
-    let distance_to_line = h.dot(&d);
-    let closest_point_on_line = d * distance_to_line;
-    let perpendicular_distance_sq = h.dot(&h) - distance_to_line * distance_to_line;
-    
-    let max_speed_sq = max_speed * max_speed;
-    
-    if perpendicular_distance_sq > max_speed_sq + EPSILON {
-        // Line doesn't intersect circle
-        return None;
-    }
-    
-    // Compute intersection points
-    let chord_half_length_sq = max_speed_sq - perpendicular_distance_sq;
-    if chord_half_length_sq < 0.0 {
-        return None;
-    }
-    
-    let chord_half_length = chord_half_length_sq.sqrt();
-    let intersection1 = closest_point_on_line + d * chord_half_length;
-    let intersection2 = closest_point_on_line - d * chord_half_length;
-    
-    // Choose intersection closer to preferred velocity
-    let dist1_sq = (intersection1 - *pref_velocity).dot(&(intersection1 - *pref_velocity));
-    let dist2_sq = (intersection2 - *pref_velocity).dot(&(intersection2 - *pref_velocity));
-    
-    if dist1_sq < dist2_sq {
-        Some(intersection1)
-    } else {
-        Some(intersection2)
-    }
-}
 
 /// Solves 3D linear program for infeasible case (emergency mode)
 fn solve_3d_linear_program(orca_lines: &[OrcaLine], max_speed: f64) -> Vector2D {
-    // In infeasible case, find velocity that minimally violates constraints
-    // For simplicity, return velocity that minimizes maximum constraint violation
+    use good_lp::*;
     
-    // Start with zero velocity (safest fallback)
-    let mut best_velocity = Vector2D::new(0.0, 0.0);
-    let mut min_max_violation = f64::INFINITY;
+    // Create variables: vx, vy, and d (penetration depth to minimize)
+    variables! {
+        vars:
+            -10000.0 <= vx <= 10000.0;
+            -10000.0 <= vy <= 10000.0;
+            0.0 <= d;
+    }
     
-    // Sample candidate velocities in a grid pattern
-    let num_samples = 32;
-    let angle_step = 2.0 * std::f64::consts::PI / num_samples as f64;
+    // Objective: Minimize d (the maximum constraint violation)
+    let mut problem = vars.minimise(d).using(default_solver);
     
-    for i in 0..num_samples {
-        let angle = i as f64 * angle_step;
-        let candidate = Vector2D::new(angle.cos(), angle.sin()) * max_speed;
-        
-        let max_violation = compute_max_violation(&candidate, orca_lines);
-        if max_violation < min_max_violation {
-            min_max_violation = max_violation;
-            best_velocity = candidate;
+    // Add ORCA Line Constraints: (v - p) · d + d >= 0
+    // This relaxes the constraint by allowing violation d
+    for line in orca_lines {
+        let rhs = line.point.x * line.direction.x + line.point.y * line.direction.y;
+        problem = problem.with(constraint!(
+            vx * line.direction.x + vy * line.direction.y + d >= rhs
+        ));
+    }
+    
+    // Add Speed Constraint: ||v|| <= max_speed (approximated as polygon)
+    let speed_constraints = create_speed_constraint_polygon(max_speed);
+    for (dir_x, dir_y, max_val) in speed_constraints {
+        problem = problem.with(constraint!(
+            vx * dir_x + vy * dir_y <= max_val
+        ));
+    }
+    
+    // This problem should always be feasible since we allow constraint violations
+    match problem.solve() {
+        Ok(solution) => {
+            let vx_val = solution.value(vx);
+            let vy_val = solution.value(vy);
+            Vector2D::new(vx_val, vy_val)
+        }
+        Err(_) => {
+            // Fallback to zero velocity if solver fails
+            Vector2D::new(0.0, 0.0)
         }
     }
-    
-    // Also try zero velocity
-    let zero_violation = compute_max_violation(&Vector2D::new(0.0, 0.0), orca_lines);
-    if zero_violation < min_max_violation {
-        best_velocity = Vector2D::new(0.0, 0.0);
-    }
-    
-    best_velocity
 }
 
 /// Computes maximum constraint violation for a given velocity
