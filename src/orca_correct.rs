@@ -46,10 +46,9 @@ pub fn compute_new_velocity(
     }
     
     // Step 2: Attempt to solve 2D quadratic program (feasible case)
-    // Temporarily disabled due to OSQP matrix construction issues
-    // if let Some(new_velocity) = solve_2d_quadratic_program(&orca_lines, agent.max_speed, &agent.pref_velocity) {
-    //     return new_velocity;
-    // }
+    if let Some(new_velocity) = solve_2d_quadratic_program(&orca_lines, agent.max_speed, &agent.pref_velocity) {
+        return new_velocity;
+    }
     
     // Step 3: Handle infeasible case with 3D linear program
     solve_3d_linear_program(&orca_lines, agent.max_speed)
@@ -87,15 +86,19 @@ fn compute_orca_line_for_agent(
     // Handle the deadlock/perfect symmetry case where u becomes zero
     if u.dot(&u) < PERTURBATION_EPSILON * PERTURBATION_EPSILON {
         // Deadlock detected. The relative velocity is on the VO boundary.
-        // Introduce a small, deterministic perturbation. A vector perpendicular
-        // to the agent's preferred velocity is a good choice as it minimally
-        // affects its progress towards its goal.
+        // Use relative_position as shared reference frame for bilateral coordination.
+        // This ensures both agents use the same perturbation direction but with opposite effects.
         
-        let perturb_dir = if agent.pref_velocity.dot(&agent.pref_velocity) > 0.0 {
-            // Use the perpendicular of the preferred velocity
+        let perturb_dir = if relative_position.dot(&relative_position) > EPSILON {
+            // Use perpendicular to relative position vector
+            // This creates a shared reference frame: both agents see the same line,
+            // but agent A goes one way, agent B goes the other way
+            Vector2D::new(-relative_position.y, relative_position.x).normalize()
+        } else if agent.pref_velocity.dot(&agent.pref_velocity) > 0.0 {
+            // Fallback: use perpendicular of preferred velocity
             Vector2D::new(-agent.pref_velocity.y, agent.pref_velocity.x).normalize()
         } else {
-            // Fallback if preferred velocity is zero. Use an arbitrary fixed direction.
+            // Last resort: arbitrary fixed direction
             Vector2D::new(0.0, 1.0)
         };
         
@@ -259,37 +262,61 @@ fn solve_2d_quadratic_program(
         u_bounds.push(max_speed);
     }
     
-    // Create P matrix for quadratic term: minimize x'Px where P is 2x2 diagonal [[2,0],[0,2]]
-    // For OSQP, we need the upper triangular part only. For a diagonal matrix, this is just the diagonal.
-    // Let me try a different approach - use from_row_iter_dense but only with upper triangle
-    let p_matrix = CscMatrix::from_row_iter_dense(
-        2, // rows
-        2, // cols  
-        [2.0, 0.0, 0.0, 2.0].iter().copied(), // Full matrix, OSQP will extract upper triangle
-    );
+    // Create P matrix for OSQP - upper triangular format required
+    // P matrix is [[2.0, 0.0], [0.0, 2.0]] for objective ||v - v_pref||²
+    let p_matrix = CscMatrix {
+        nrows: 2,
+        ncols: 2,
+        indptr: std::borrow::Cow::Borrowed(&[0, 1, 2]),
+        indices: std::borrow::Cow::Borrowed(&[0, 1]),
+        data: std::borrow::Cow::Borrowed(&[2.0, 2.0]),
+    };
     
-    // Build A matrix from constraints (row-major)
-    let mut a_dense = Vec::new();
-    for row_data in &constraints_a {
-        a_dense.push(row_data[0]);
-        a_dense.push(row_data[1]);
+    // Build A matrix in CSC format (column-major sparse format)
+    // A is m x n where m = num_constraints, n = 2 (variables vx, vy)
+    let mut a_data = Vec::new();
+    let mut a_indices = Vec::new();
+    let mut a_indptr = vec![0];
+    
+    // Column 0 (vx coefficients)
+    for (row_idx, row_data) in constraints_a.iter().enumerate() {
+        if row_data[0] != 0.0 {
+            a_data.push(row_data[0]);
+            a_indices.push(row_idx);
+        }
     }
+    a_indptr.push(a_data.len());
     
-    let a_matrix = CscMatrix::from_row_iter_dense(
-        constraints_a.len(), // rows
-        2, // cols
-        a_dense.iter().copied(),
-    );
+    // Column 1 (vy coefficients)  
+    for (row_idx, row_data) in constraints_a.iter().enumerate() {
+        if row_data[1] != 0.0 {
+            a_data.push(row_data[1]);
+            a_indices.push(row_idx);
+        }
+    }
+    a_indptr.push(a_data.len());
+    
+    let a_matrix = CscMatrix {
+        nrows: constraints_a.len(),
+        ncols: 2,
+        indptr: std::borrow::Cow::Owned(a_indptr),
+        indices: std::borrow::Cow::Owned(a_indices),
+        data: std::borrow::Cow::Owned(a_data),
+    };
     
     // Create and Solve the Problem
     let settings = Settings::default().verbose(false);
     
-    println!("Debug: Problem setup - {} constraints, bounds len: {}", constraints_a.len(), l_bounds.len());
-    
-    let mut problem = match Problem::new(p_matrix, q, a_matrix, &l_bounds, &u_bounds, &settings) {
+    let mut problem = match Problem::new(
+        p_matrix,
+        q,
+        a_matrix,
+        &l_bounds,
+        &u_bounds,
+        &settings,
+    ) {
         Ok(p) => p,
         Err(e) => {
-            println!("Debug: Problem creation failed: {:?}", e);
             return None;
         }
     };
@@ -343,15 +370,134 @@ fn project_onto_constraints(
 /// Variables: x = [vx, vy, d] where d is the minimum penetration distance
 /// Objective: minimize d (minimize constraint violations)
 fn solve_3d_linear_program(orca_lines: &[OrcaLine], max_speed: f64) -> Vector2D {
+    println!("Debug: Entering 3D LP solver with {} ORCA lines", orca_lines.len());
     
-    // Fallback implementation: try to find a feasible velocity
-    // For now, implement a simple constraint satisfaction approach
+    // Variables: [vx, vy, d] where d is the maximum constraint violation
+    // Objective: minimize d
+    let q = &[0.0, 0.0, 1.0]; // minimize d (3rd variable)
     
+    // P matrix is zero for linear program (no quadratic terms)
+    let p_matrix = CscMatrix {
+        nrows: 3,
+        ncols: 3,
+        indptr: std::borrow::Cow::Borrowed(&[0, 0, 0, 0]), // All columns empty
+        indices: std::borrow::Cow::Borrowed(&[]),
+        data: std::borrow::Cow::Borrowed(&[]),
+    };
+    
+    // Build constraint matrix A for: Ax <= u, l <= Ax
+    let mut constraints_a: Vec<[f64; 3]> = Vec::new();
+    let mut l_bounds = Vec::new();
+    let mut u_bounds = Vec::new();
+    
+    // Add ORCA constraints: vx*dx + vy*dy - d >= px*dx + py*dy
+    // Rearranged: -vx*dx - vy*dy + d <= -px*dx - py*dy
+    for line in orca_lines {
+        constraints_a.push([-line.direction.x, -line.direction.y, 1.0]);
+        let rhs = -line.point.dot(&line.direction);
+        l_bounds.push(f64::NEG_INFINITY);
+        u_bounds.push(rhs);
+    }
+    
+    // Add speed constraints using circular approximation (16-sided polygon)
+    let num_sides = 16;
+    for i in 0..num_sides {
+        let angle = (i as f64 / num_sides as f64) * 2.0 * std::f64::consts::PI;
+        let dir = Vector2D::new(angle.cos(), angle.sin());
+        constraints_a.push([dir.x, dir.y, 0.0]); // d doesn't affect speed constraint
+        l_bounds.push(f64::NEG_INFINITY);
+        u_bounds.push(max_speed);
+    }
+    
+    // Bound d >= 0 (non-negative violation)
+    constraints_a.push([0.0, 0.0, 1.0]);
+    l_bounds.push(0.0);
+    u_bounds.push(f64::INFINITY);
+    
+    // Build A matrix in CSC format
+    let mut a_data = Vec::new();
+    let mut a_indices = Vec::new();
+    let mut a_indptr = vec![0];
+    
+    // Column 0 (vx coefficients)
+    for (row_idx, row_data) in constraints_a.iter().enumerate() {
+        if row_data[0] != 0.0 {
+            a_data.push(row_data[0]);
+            a_indices.push(row_idx);
+        }
+    }
+    a_indptr.push(a_data.len());
+    
+    // Column 1 (vy coefficients)
+    for (row_idx, row_data) in constraints_a.iter().enumerate() {
+        if row_data[1] != 0.0 {
+            a_data.push(row_data[1]);
+            a_indices.push(row_idx);
+        }
+    }
+    a_indptr.push(a_data.len());
+    
+    // Column 2 (d coefficients)
+    for (row_idx, row_data) in constraints_a.iter().enumerate() {
+        if row_data[2] != 0.0 {
+            a_data.push(row_data[2]);
+            a_indices.push(row_idx);
+        }
+    }
+    a_indptr.push(a_data.len());
+    
+    let a_matrix = CscMatrix {
+        nrows: constraints_a.len(),
+        ncols: 3,
+        indptr: std::borrow::Cow::Owned(a_indptr),
+        indices: std::borrow::Cow::Owned(a_indices),
+        data: std::borrow::Cow::Owned(a_data),
+    };
+    
+    // Solve with OSQP
+    let settings = Settings::default().verbose(false);
+    
+    let mut problem = match Problem::new(
+        p_matrix,
+        q,
+        a_matrix,
+        &l_bounds,
+        &u_bounds,
+        &settings,
+    ) {
+        Ok(p) => p,
+        Err(_e) => {
+            println!("Debug: 3D LP setup failed, using fallback");
+            return solve_3d_linear_program_fallback(orca_lines, max_speed);
+        }
+    };
+    
+    let result = problem.solve();
+    match result {
+        osqp::Status::Solved(solution) => {
+            let sol = solution.x();
+            let velocity = Vector2D::new(sol[0], sol[1]);
+            let violation = sol[2];
+            println!("Debug: 3D LP solved successfully: v=({:.6}, {:.6}), d={:.6}", 
+                     velocity.x, velocity.y, violation);
+            velocity
+        },
+        _ => {
+            println!("Debug: 3D LP failed, using fallback");
+            solve_3d_linear_program_fallback(orca_lines, max_speed)
+        }
+    }
+}
+
+/// Fallback constraint satisfaction approach when OSQP fails
+/// This implements a simple constraint satisfaction that prioritizes finding
+/// any feasible velocity, with preference for minimal violations
+fn solve_3d_linear_program_fallback(orca_lines: &[OrcaLine], max_speed: f64) -> Vector2D {
     // Start with zero velocity and try to find something that satisfies constraints
     let mut best_velocity = Vector2D::new(0.0, 0.0);
     let mut min_violation = f64::INFINITY;
     
-    // Try various directions
+    // Try various directions, including small perturbations for symmetry breaking
     let num_samples = 32;
     for i in 0..num_samples {
         let angle = (i as f64 / num_samples as f64) * 2.0 * std::f64::consts::PI;
@@ -380,6 +526,30 @@ fn solve_3d_linear_program(orca_lines: &[OrcaLine], max_speed: f64) -> Vector2D 
         }
     }
     
+    // If we haven't found a good solution, try small perturbations around zero
+    if min_violation > 0.1 {
+        for i in 0..8 {
+            let angle = (i as f64 / 8.0) * 2.0 * std::f64::consts::PI;
+            let candidate = Vector2D::new(
+                PERTURBATION_EPSILON * angle.cos(),
+                PERTURBATION_EPSILON * angle.sin(),
+            );
+            
+            let mut max_violation = 0.0;
+            for line in orca_lines {
+                let relative_velocity = candidate - line.point;
+                let violation = -relative_velocity.dot(&line.direction);
+                if violation > max_violation {
+                    max_violation = violation;
+                }
+            }
+            
+            if max_violation < min_violation {
+                min_violation = max_violation;
+                best_velocity = candidate;
+            }
+        }
+    }
     
     best_velocity
 }
