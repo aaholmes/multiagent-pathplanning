@@ -1,3 +1,19 @@
+//! # A* Pathfinding
+//!
+//! Time-space A* pathfinding algorithm for single-agent navigation with constraints.
+//!
+//! ## Algorithm
+//!
+//! This implementation extends classic A* to operate in a 3D time-space graph:
+//! - Each state is (x, y, t) representing position at a specific time step
+//! - Supports temporal constraints to avoid conflicts with other agents
+//! - Uses Manhattan distance heuristic for grid-based movement
+//!
+//! ## Usage
+//!
+//! Primarily used internally by CBS for finding individual agent paths.
+//! Call `find_single_agent_path` for standalone pathfinding.
+
 use crate::structs::{Point, Grid, Path, Constraint};
 use ordered_float::OrderedFloat;
 use priority_queue::PriorityQueue;
