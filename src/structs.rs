@@ -1,3 +1,14 @@
+//! # Core Data Structures
+//!
+//! This module defines the fundamental data types used throughout the library:
+//!
+//! - **Point**: 2D position in continuous space
+//! - **Vector2D**: 2D velocity/direction vector with arithmetic operations
+//! - **AgentState**: Complete state of an agent (position, velocity, radius, etc.)
+//! - **Task**: Pathfinding task with start/goal positions
+//! - **Grid**: 2D obstacle grid for pathfinding
+//! - **Constraint/Conflict/CTNode**: Internal types for CBS algorithm
+
 use pyo3::prelude::*;
 use std::collections::HashMap;
 use std::ops::{Add, Sub, Mul};

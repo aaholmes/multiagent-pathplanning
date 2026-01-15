@@ -1,3 +1,24 @@
+//! # Conflict-Based Search (CBS)
+//!
+//! Optimal multi-agent pathfinding algorithm that finds collision-free paths.
+//!
+//! ## Algorithm
+//!
+//! CBS operates in two levels:
+//! 1. **High-level**: Searches a constraint tree (CT) where each node represents
+//!    a set of constraints. Expands nodes by detecting conflicts and adding constraints.
+//! 2. **Low-level**: Uses A* to find optimal paths for individual agents subject
+//!    to the constraints at that CT node.
+//!
+//! ## Conflict Types
+//!
+//! - **Vertex conflict**: Two agents at the same position at the same time
+//! - **Edge conflict**: Two agents swap positions (cross paths) at the same time
+//!
+//! ## Reference
+//!
+//! Sharon et al., "Conflict-Based Search for Optimal Multi-Agent Pathfinding" (AAAI 2012)
+
 use crate::astar::find_single_agent_path;
 use crate::structs::{Grid, Task, Path, Constraint, Conflict, CTNode};
 use ordered_float::OrderedFloat;

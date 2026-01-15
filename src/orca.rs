@@ -310,13 +310,10 @@ fn solve_2d_quadratic_program(
         }
     }
     
-    println!("Debug: Entering 2D QP solver with {} ORCA lines", orca_lines.len());
-    
     // Define the QP Problem in OSQP format
-    
+
     // q vector (linear term) for minimizing ||v - pref_velocity||^2
     let q = &[-2.0 * pref_velocity.x, -2.0 * pref_velocity.y];
-    println!("Debug: q vector = [{:.3}, {:.3}]", q[0], q[1]);
     
     // Define the Linear Constraints in the form l <= Ax <= u
     let mut constraints_a: Vec<[f64; 2]> = Vec::new();
@@ -324,13 +321,11 @@ fn solve_2d_quadratic_program(
     let mut u_bounds = Vec::new();
     
     // Add ORCA constraints: v·d >= p·d
-    for (i, line) in orca_lines.iter().enumerate() {
+    for line in orca_lines.iter() {
         constraints_a.push([line.direction.x, line.direction.y]);
         let rhs = line.point.dot(&line.direction);
         l_bounds.push(rhs);
         u_bounds.push(f64::INFINITY);
-        println!("Debug: ORCA constraint {}: [{:.3}, {:.3}] * v >= {:.3}", 
-                 i, line.direction.x, line.direction.y, rhs);
     }
     
     // Add speed constraints using polygonal approximation
@@ -420,56 +415,21 @@ fn solve_2d_quadratic_program(
         let velocity = Vector2D::new(sol[0], sol[1]);
         // Verify solution is within speed limit
         if velocity.magnitude() <= max_speed + 0.01 {
-            println!("Debug: 2D QP solved: ({:.6}, {:.6})", velocity.x, velocity.y);
             Some(velocity)
         } else {
             // Solution exceeds speed limit, normalize it
             let clamped = velocity.normalize() * max_speed;
-            println!("Debug: 2D QP solved but clamped: ({:.6}, {:.6})", clamped.x, clamped.y);
             Some(clamped)
         }
     } else {
-        println!("Debug: 2D QP infeasible, falling back to 3D LP");
         None
     }
 }
-
-/// Projects a velocity onto the ORCA constraints and speed limit
-fn project_onto_constraints(
-    velocity: Vector2D,
-    orca_lines: &[OrcaLine],
-    max_speed: f64,
-) -> Vector2D {
-    let mut projected_v = velocity;
-    
-    // Project onto ORCA line constraints
-    for line in orca_lines {
-        let constraint_val = (projected_v - line.point).dot(&line.direction);
-        if constraint_val < 0.0 {
-            // Violates constraint, project onto the line
-            projected_v = projected_v - line.direction * constraint_val;
-        }
-    }
-    
-    // Project onto speed constraint
-    if projected_v.magnitude() > max_speed {
-        if projected_v.magnitude() > EPSILON {
-            projected_v = projected_v.normalize() * max_speed;
-        } else {
-            projected_v = Vector2D::new(0.0, 0.0);
-        }
-    }
-    
-    projected_v
-}
-
 
 /// Solves 3D linear program for infeasible case using OSQP
 /// Variables: x = [vx, vy, d] where d is the minimum penetration distance
 /// Objective: minimize d (minimize constraint violations)
 fn solve_3d_linear_program(orca_lines: &[OrcaLine], max_speed: f64) -> Vector2D {
-    println!("Debug: Entering 3D LP solver with {} ORCA lines", orca_lines.len());
-
     // Variables: [vx, vy, d] where d is the maximum constraint violation
     // Objective: minimize d with small regularization on velocity for numerical stability
     let q = &[0.0, 0.0, 1.0]; // minimize d (3rd variable)
@@ -571,7 +531,6 @@ fn solve_3d_linear_program(orca_lines: &[OrcaLine], max_speed: f64) -> Vector2D 
     ) {
         Ok(p) => p,
         Err(_e) => {
-            println!("Debug: 3D LP setup failed, using fallback");
             return solve_3d_linear_program_fallback(orca_lines, max_speed);
         }
     };
@@ -587,16 +546,12 @@ fn solve_3d_linear_program(orca_lines: &[OrcaLine], max_speed: f64) -> Vector2D 
 
     if let Some(sol) = maybe_solution {
         let mut velocity = Vector2D::new(sol[0], sol[1]);
-        let violation = sol[2];
         // Clamp to max speed if needed
         if velocity.magnitude() > max_speed {
             velocity = velocity.normalize() * max_speed;
         }
-        println!("Debug: 3D LP result: v=({:.6}, {:.6}), d={:.6}",
-                 velocity.x, velocity.y, violation);
         velocity
     } else {
-        println!("Debug: 3D LP failed, using fallback");
         solve_3d_linear_program_fallback(orca_lines, max_speed)
     }
 }
@@ -687,21 +642,6 @@ fn solve_3d_linear_program_fallback(orca_lines: &[OrcaLine], max_speed: f64) -> 
     }
 
     best_velocity
-}
-
-/// Computes maximum constraint violation for a given velocity
-fn compute_max_violation(velocity: &Vector2D, orca_lines: &[OrcaLine]) -> f64 {
-    let mut max_violation = 0.0;
-    
-    for line in orca_lines {
-        let relative_velocity = *velocity - line.point;
-        let violation = -relative_velocity.dot(&line.direction);
-        if violation > max_violation {
-            max_violation = violation;
-        }
-    }
-    
-    max_violation
 }
 
 #[cfg(test)]
@@ -965,8 +905,310 @@ mod tests {
         let final_avg_speed: f64 = speed_history.iter().sum::<f64>() / speed_history.len() as f64;
         let min_expected_speed = 0.25 * max_speed;
         
-        assert!(final_avg_speed > min_expected_speed, 
-            "System appears to have deadlocked. Average speed over last 50 steps: {:.3}, expected > {:.3}", 
+        assert!(final_avg_speed > min_expected_speed,
+            "System appears to have deadlocked. Average speed over last 50 steps: {:.3}, expected > {:.3}",
             final_avg_speed, min_expected_speed);
+    }
+
+    // ============ Unit Tests for Internal Functions ============
+
+    // --- Tests for compute_orca_line_for_agent ---
+
+    #[test]
+    fn test_compute_orca_line_approaching_agents() {
+        // Two agents approaching each other - should produce valid ORCA line
+        let agent = AgentState::new(
+            0,
+            Point::new(0.0, 0.0),
+            Vector2D::new(1.0, 0.0),
+            0.5,
+            Vector2D::new(1.0, 0.0),
+            1.0,
+        );
+        let neighbor = AgentState::new(
+            1,
+            Point::new(5.0, 0.0),
+            Vector2D::new(-1.0, 0.0),
+            0.5,
+            Vector2D::new(-1.0, 0.0),
+            1.0,
+        );
+
+        let result = compute_orca_line_for_agent(&agent, &neighbor, 2.0);
+        assert!(result.is_some(), "Should produce ORCA line for approaching agents");
+
+        let line = result.unwrap();
+        // Direction should have a component pointing away from collision
+        assert!(line.direction.magnitude() > 0.9, "Direction should be normalized");
+    }
+
+    #[test]
+    fn test_compute_orca_line_overlapping_agents() {
+        // Agents at same position - should return None (degeneracy)
+        let agent = AgentState::new(
+            0,
+            Point::new(0.0, 0.0),
+            Vector2D::new(0.0, 0.0),
+            0.5,
+            Vector2D::new(1.0, 0.0),
+            1.0,
+        );
+        let neighbor = AgentState::new(
+            1,
+            Point::new(0.0, 0.0), // Same position
+            Vector2D::new(0.0, 0.0),
+            0.5,
+            Vector2D::new(-1.0, 0.0),
+            1.0,
+        );
+
+        let result = compute_orca_line_for_agent(&agent, &neighbor, 2.0);
+        assert!(result.is_none(), "Should return None for overlapping agents");
+    }
+
+    #[test]
+    fn test_compute_orca_line_stationary_agents() {
+        // Both agents stationary but close - should still produce constraint
+        let agent = AgentState::new(
+            0,
+            Point::new(0.0, 0.0),
+            Vector2D::new(0.0, 0.0),
+            0.5,
+            Vector2D::new(0.0, 0.0),
+            1.0,
+        );
+        let neighbor = AgentState::new(
+            1,
+            Point::new(2.0, 0.0),
+            Vector2D::new(0.0, 0.0),
+            0.5,
+            Vector2D::new(0.0, 0.0),
+            1.0,
+        );
+
+        let result = compute_orca_line_for_agent(&agent, &neighbor, 2.0);
+        assert!(result.is_some(), "Should produce ORCA line even for stationary agents");
+    }
+
+    #[test]
+    fn test_compute_orca_line_perpendicular_motion() {
+        // Agents moving perpendicular to each other
+        let agent = AgentState::new(
+            0,
+            Point::new(0.0, 0.0),
+            Vector2D::new(1.0, 0.0), // Moving right
+            0.5,
+            Vector2D::new(1.0, 0.0),
+            1.0,
+        );
+        let neighbor = AgentState::new(
+            1,
+            Point::new(3.0, -3.0),
+            Vector2D::new(0.0, 1.0), // Moving up
+            0.5,
+            Vector2D::new(0.0, 1.0),
+            1.0,
+        );
+
+        let result = compute_orca_line_for_agent(&agent, &neighbor, 2.0);
+        assert!(result.is_some(), "Should produce ORCA line for perpendicular motion");
+    }
+
+    // --- Tests for find_closest_point_on_vo_boundary ---
+
+    #[test]
+    fn test_find_closest_point_inside_disk() {
+        // Point inside the disk - should project to boundary
+        let vo_center = Vector2D::new(5.0, 0.0);
+        let vo_radius = 2.0;
+        let point = Vector2D::new(5.0, 0.5); // Inside disk
+
+        let closest = find_closest_point_on_vo_boundary(point, vo_center, vo_radius);
+
+        // Should be on the disk boundary
+        let dist_to_center = (closest - vo_center).magnitude();
+        assert!((dist_to_center - vo_radius).abs() < 0.01,
+            "Closest point should be on disk boundary, got dist {}", dist_to_center);
+    }
+
+    #[test]
+    fn test_find_closest_point_at_center() {
+        // Point exactly at center - should pick a consistent direction
+        let vo_center = Vector2D::new(5.0, 0.0);
+        let vo_radius = 2.0;
+        let point = vo_center; // At center
+
+        let closest = find_closest_point_on_vo_boundary(point, vo_center, vo_radius);
+
+        // Should be on the disk boundary
+        let dist_to_center = (closest - vo_center).magnitude();
+        assert!((dist_to_center - vo_radius).abs() < 0.01,
+            "Closest point should be on disk boundary");
+    }
+
+    #[test]
+    fn test_find_closest_point_outside_disk() {
+        // Point far outside the disk - may project to disk edge or cone leg
+        let vo_center = Vector2D::new(5.0, 0.0);
+        let vo_radius = 1.0;
+        let point = Vector2D::new(10.0, 5.0); // Far outside
+
+        let closest = find_closest_point_on_vo_boundary(point, vo_center, vo_radius);
+
+        // Result should be a valid point (not NaN or infinite)
+        assert!(closest.x.is_finite() && closest.y.is_finite(),
+            "Closest point should be finite");
+    }
+
+    // --- Tests for project_point_onto_ray ---
+
+    #[test]
+    fn test_project_point_onto_ray_forward() {
+        // Point projects forward onto ray
+        let ray_origin = Vector2D::new(0.0, 0.0);
+        let ray_direction = Vector2D::new(1.0, 0.0);
+        let point = Vector2D::new(5.0, 3.0);
+
+        let projection = project_point_onto_ray(point, ray_origin, ray_direction);
+
+        assert!((projection.x - 5.0).abs() < EPSILON, "X should be 5.0");
+        assert!(projection.y.abs() < EPSILON, "Y should be 0.0");
+    }
+
+    #[test]
+    fn test_project_point_onto_ray_behind() {
+        // Point is behind the ray origin - should return origin
+        let ray_origin = Vector2D::new(0.0, 0.0);
+        let ray_direction = Vector2D::new(1.0, 0.0);
+        let point = Vector2D::new(-5.0, 3.0); // Behind origin
+
+        let projection = project_point_onto_ray(point, ray_origin, ray_direction);
+
+        assert!((projection - ray_origin).magnitude() < EPSILON,
+            "Should return ray origin for point behind ray");
+    }
+
+    #[test]
+    fn test_project_point_onto_ray_on_ray() {
+        // Point is exactly on the ray
+        let ray_origin = Vector2D::new(0.0, 0.0);
+        let ray_direction = Vector2D::new(1.0, 0.0);
+        let point = Vector2D::new(3.0, 0.0); // On ray
+
+        let projection = project_point_onto_ray(point, ray_origin, ray_direction);
+
+        assert!((projection - point).magnitude() < EPSILON,
+            "Projection of point on ray should be the point itself");
+    }
+
+    // --- Tests for solve_2d_quadratic_program ---
+
+    #[test]
+    fn test_solve_2d_qp_no_constraints() {
+        // No ORCA constraints - should return preferred velocity (within speed limit)
+        let orca_lines: Vec<OrcaLine> = vec![];
+        let max_speed = 2.0;
+        let pref_velocity = Vector2D::new(1.0, 0.5);
+
+        let result = solve_2d_quadratic_program(&orca_lines, max_speed, &pref_velocity);
+
+        assert!(result.is_some(), "Should succeed with no constraints");
+        let velocity = result.unwrap();
+        assert!((velocity - pref_velocity).magnitude() < 0.01,
+            "Should return preferred velocity when unconstrained");
+    }
+
+    #[test]
+    fn test_solve_2d_qp_speed_clamping() {
+        // Preferred velocity exceeds max speed - should clamp
+        let orca_lines: Vec<OrcaLine> = vec![];
+        let max_speed = 1.0;
+        let pref_velocity = Vector2D::new(5.0, 0.0); // Exceeds max
+
+        let result = solve_2d_quadratic_program(&orca_lines, max_speed, &pref_velocity);
+
+        assert!(result.is_some(), "Should succeed");
+        let velocity = result.unwrap();
+        assert!(velocity.magnitude() <= max_speed + 0.01,
+            "Velocity should be clamped to max speed");
+    }
+
+    #[test]
+    fn test_solve_2d_qp_single_constraint() {
+        // Single ORCA constraint - should find feasible velocity
+        let constraint = OrcaLine::new(
+            Vector2D::new(0.0, 0.0),
+            Vector2D::new(0.0, 1.0), // Must have positive y component
+        );
+        let orca_lines = vec![constraint];
+        let max_speed = 2.0;
+        let pref_velocity = Vector2D::new(1.0, 1.0);
+
+        let result = solve_2d_quadratic_program(&orca_lines, max_speed, &pref_velocity);
+
+        assert!(result.is_some(), "Should find feasible velocity");
+        let velocity = result.unwrap();
+        // Should satisfy constraint: v · direction >= point · direction
+        assert!(velocity.y >= -0.01, "Should satisfy constraint");
+    }
+
+    #[test]
+    fn test_solve_2d_qp_multiple_constraints() {
+        // Multiple ORCA constraints that are feasible together
+        let constraint1 = OrcaLine::new(
+            Vector2D::new(0.0, 0.1),
+            Vector2D::new(0.0, 1.0), // vy >= 0.1
+        );
+        let constraint2 = OrcaLine::new(
+            Vector2D::new(0.1, 0.0),
+            Vector2D::new(1.0, 0.0), // vx >= 0.1
+        );
+        let orca_lines = vec![constraint1, constraint2];
+        let max_speed = 2.0;
+        let pref_velocity = Vector2D::new(1.0, 1.0);
+
+        let result = solve_2d_quadratic_program(&orca_lines, max_speed, &pref_velocity);
+
+        assert!(result.is_some(), "Should find feasible velocity");
+        let velocity = result.unwrap();
+        assert!(velocity.x >= 0.09 && velocity.y >= 0.09,
+            "Should satisfy both constraints, got {:?}", velocity);
+    }
+
+    // --- Tests for solve_3d_linear_program ---
+
+    #[test]
+    fn test_solve_3d_lp_returns_valid_velocity() {
+        // Even with conflicting constraints, 3D LP should return something valid
+        let constraint1 = OrcaLine::new(
+            Vector2D::new(1.0, 0.0),
+            Vector2D::new(1.0, 0.0), // vx >= 1.0
+        );
+        let constraint2 = OrcaLine::new(
+            Vector2D::new(-1.0, 0.0),
+            Vector2D::new(-1.0, 0.0), // vx <= -1.0 (conflicts with above)
+        );
+        let orca_lines = vec![constraint1, constraint2];
+        let max_speed = 1.0;
+
+        let result = solve_3d_linear_program(&orca_lines, max_speed);
+
+        // Should return a finite velocity within speed limit
+        assert!(result.x.is_finite() && result.y.is_finite(),
+            "Should return finite velocity");
+        assert!(result.magnitude() <= max_speed + 0.1,
+            "Should respect speed limit");
+    }
+
+    #[test]
+    fn test_solve_3d_lp_empty_constraints() {
+        // No constraints - should return zero or valid velocity
+        let orca_lines: Vec<OrcaLine> = vec![];
+        let max_speed = 1.0;
+
+        let result = solve_3d_linear_program(&orca_lines, max_speed);
+
+        assert!(result.magnitude() <= max_speed + 0.1,
+            "Should respect speed limit even with no constraints");
     }
 }
