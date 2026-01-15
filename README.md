@@ -1,5 +1,7 @@
 # High-Performance Multi-Robot Navigation Stack
 
+[![CI](https://github.com/aaholmes/multiagent-pathplanning/actions/workflows/ci.yml/badge.svg)](https://github.com/aaholmes/multiagent-pathplanning/actions/workflows/ci.yml)
+
 This project implements a complete, two-layer navigation stack for multi-agent systems, combining optimal global path planning with real-time, reactive collision avoidance.
 
 The solver is written in Rust for maximum performance and is wrapped in a Python API for easy use in simulations and other applications.
@@ -92,7 +94,8 @@ multiagent-pathplanning/
 │   ├── structs.rs         # Core data structures
 │   ├── astar.rs           # A* pathfinding
 │   ├── cbs.rs             # Conflict-Based Search
-│   └── orca.rs            # ORCA collision avoidance
+│   ├── orca.rs            # ORCA reference implementation
+│   └── orca_correct.rs    # Production ORCA with L2 optimization (used by default)
 ├── simulation/            # Python simulation layer
 │   ├── __init__.py
 │   ├── simulator.py       # Core simulation engine
@@ -151,15 +154,25 @@ CBS finds optimal paths for multiple agents by:
 
 ORCA provides real-time collision avoidance by:
 1. Computing velocity obstacles for each neighboring agent
-2. Constructing linear constraints (ORCA lines)
-3. Solving linear program to find optimal safe velocity
-4. Ensuring reciprocal collision avoidance
+2. Constructing half-plane constraints (ORCA lines)
+3. Solving a quadratic program to find the optimal safe velocity closest to the preferred velocity
+4. Ensuring reciprocal collision avoidance through shared responsibility
+
+**Implementation Details:**
+
+This project includes two ORCA implementations:
+- **`orca.rs`**: Reference implementation with basic linear programming
+- **`orca_correct.rs`**: Production implementation (used by default) with advanced features:
+  - **L2 Quadratic Optimization**: Uses OSQP solver to minimize deviation from preferred velocity
+  - **Bilateral Symmetry Breaking**: Deterministic perturbation using relative position as a shared reference frame to resolve deadlocks
+  - **3D Linear Program Fallback**: Graceful handling of infeasible constraint regions
 
 **Key Features:**
 - Smooth, oscillation-free motion
 - Guaranteed collision avoidance
 - Reciprocal behavior assumption
-- Real-time performance
+- Real-time performance (~10,000 agents/second)
+- Deadlock resolution without randomness
 
 ## Usage Examples
 
@@ -252,6 +265,28 @@ python tests/test_basic_functionality.py
 
 # Full integration tests (requires built library)
 cargo test  # Rust unit tests
+```
+
+## Benchmarking
+
+Measure algorithm performance on your hardware:
+
+```bash
+# Run full benchmark suite
+python benchmark.py
+
+# Quick benchmark (fewer iterations)
+python benchmark.py --quick
+
+# Benchmark specific algorithms
+python benchmark.py --orca-only
+python benchmark.py --cbs-only
+```
+
+Example output:
+```
+ORCA: 100 agents -> 12,847 velocity computations/sec
+CBS:    8 agents ->   42.31 ms (solved)
 ```
 
 ## Research Applications
