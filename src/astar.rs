@@ -163,21 +163,275 @@ pub fn find_single_agent_path(
 mod tests {
     use super::*;
 
+    // ==================== AStarNode Tests ====================
+
+    #[test]
+    fn test_astar_node_new() {
+        let node = AStarNode::new((5, 10), 3);
+        assert_eq!(node.position, (5, 10));
+        assert_eq!(node.time_step, 3);
+    }
+
+    #[test]
+    fn test_astar_node_equality() {
+        let node1 = AStarNode::new((5, 10), 3);
+        let node2 = AStarNode::new((5, 10), 3);
+        let node3 = AStarNode::new((5, 10), 4);
+        assert_eq!(node1, node2);
+        assert_ne!(node1, node3);
+    }
+
+    #[test]
+    fn test_astar_node_hash() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(AStarNode::new((5, 10), 3));
+        set.insert(AStarNode::new((5, 10), 3)); // Duplicate
+        set.insert(AStarNode::new((5, 10), 4));
+        assert_eq!(set.len(), 2);
+    }
+
+    // ==================== AStar Constructor Tests ====================
+
+    #[test]
+    fn test_astar_new() {
+        let grid = Grid::new(10, 10);
+        let astar = AStar::new(grid);
+        assert!(astar.constraints.is_empty());
+        assert_eq!(astar.grid.width, 10);
+        assert_eq!(astar.grid.height, 10);
+    }
+
+    #[test]
+    fn test_astar_with_constraints_filters_by_agent() {
+        let grid = Grid::new(10, 10);
+        let constraints = vec![
+            Constraint::new(0, (1, 1), 1),
+            Constraint::new(0, (2, 2), 2),
+            Constraint::new(1, (3, 3), 3), // Different agent
+            Constraint::new(1, (4, 4), 4), // Different agent
+        ];
+        let astar = AStar::with_constraints(grid, &constraints, 0);
+        assert_eq!(astar.constraints.len(), 2);
+    }
+
+    #[test]
+    fn test_astar_with_no_matching_constraints() {
+        let grid = Grid::new(10, 10);
+        let constraints = vec![
+            Constraint::new(1, (1, 1), 1),
+            Constraint::new(2, (2, 2), 2),
+        ];
+        let astar = AStar::with_constraints(grid, &constraints, 0);
+        assert!(astar.constraints.is_empty());
+    }
+
+    #[test]
+    fn test_astar_with_empty_constraints() {
+        let grid = Grid::new(10, 10);
+        let constraints: Vec<Constraint> = vec![];
+        let astar = AStar::with_constraints(grid, &constraints, 0);
+        assert!(astar.constraints.is_empty());
+    }
+
+    // ==================== Heuristic Tests ====================
+
+    #[test]
+    fn test_heuristic_same_position() {
+        let grid = Grid::new(10, 10);
+        let astar = AStar::new(grid);
+        assert_eq!(astar.heuristic((5, 5), (5, 5)), 0.0);
+    }
+
+    #[test]
+    fn test_heuristic_horizontal() {
+        let grid = Grid::new(10, 10);
+        let astar = AStar::new(grid);
+        assert_eq!(astar.heuristic((0, 0), (5, 0)), 5.0);
+    }
+
+    #[test]
+    fn test_heuristic_vertical() {
+        let grid = Grid::new(10, 10);
+        let astar = AStar::new(grid);
+        assert_eq!(astar.heuristic((0, 0), (0, 5)), 5.0);
+    }
+
+    #[test]
+    fn test_heuristic_diagonal() {
+        let grid = Grid::new(10, 10);
+        let astar = AStar::new(grid);
+        // Manhattan distance for diagonal
+        assert_eq!(astar.heuristic((0, 0), (3, 4)), 7.0);
+    }
+
+    #[test]
+    fn test_heuristic_negative_coords() {
+        let grid = Grid::new(10, 10);
+        let astar = AStar::new(grid);
+        assert_eq!(astar.heuristic((-3, -4), (0, 0)), 7.0);
+    }
+
+    // ==================== is_constrained Tests ====================
+
+    #[test]
+    fn test_is_constrained_true() {
+        let grid = Grid::new(10, 10);
+        let constraints = vec![Constraint::new(0, (5, 5), 10)];
+        let astar = AStar::with_constraints(grid, &constraints, 0);
+        assert!(astar.is_constrained(0, (5, 5), 10));
+    }
+
+    #[test]
+    fn test_is_constrained_false_wrong_position() {
+        let grid = Grid::new(10, 10);
+        let constraints = vec![Constraint::new(0, (5, 5), 10)];
+        let astar = AStar::with_constraints(grid, &constraints, 0);
+        assert!(!astar.is_constrained(0, (5, 6), 10));
+    }
+
+    #[test]
+    fn test_is_constrained_false_wrong_time() {
+        let grid = Grid::new(10, 10);
+        let constraints = vec![Constraint::new(0, (5, 5), 10)];
+        let astar = AStar::with_constraints(grid, &constraints, 0);
+        assert!(!astar.is_constrained(0, (5, 5), 11));
+    }
+
+    // ==================== find_path Basic Tests ====================
+
     #[test]
     fn test_simple_path() {
         let grid = Grid::new(5, 5);
         let astar = AStar::new(grid);
-        
+
         let start = Point::new(0.0, 0.0);
         let goal = Point::new(4.0, 4.0);
-        
+
         let path = astar.find_path(start, goal, 0, Some(100));
         assert!(path.is_some());
-        
+
         let path = path.unwrap();
         assert_eq!(path.first().unwrap(), &start);
         assert_eq!(path.last().unwrap(), &goal);
     }
+
+    #[test]
+    fn test_path_same_start_goal() {
+        let grid = Grid::new(5, 5);
+        let astar = AStar::new(grid);
+
+        let pos = Point::new(2.0, 2.0);
+        let path = astar.find_path(pos, pos, 0, Some(100));
+        assert!(path.is_some());
+
+        let path = path.unwrap();
+        assert_eq!(path.len(), 1);
+        assert_eq!(path[0], pos);
+    }
+
+    #[test]
+    fn test_path_horizontal() {
+        let grid = Grid::new(10, 10);
+        let astar = AStar::new(grid);
+
+        let start = Point::new(0.0, 5.0);
+        let goal = Point::new(9.0, 5.0);
+
+        let path = astar.find_path(start, goal, 0, Some(100));
+        assert!(path.is_some());
+
+        let path = path.unwrap();
+        assert_eq!(path.first().unwrap(), &start);
+        assert_eq!(path.last().unwrap(), &goal);
+        // Optimal path length is 10 (including start)
+        assert_eq!(path.len(), 10);
+    }
+
+    #[test]
+    fn test_path_vertical() {
+        let grid = Grid::new(10, 10);
+        let astar = AStar::new(grid);
+
+        let start = Point::new(5.0, 0.0);
+        let goal = Point::new(5.0, 9.0);
+
+        let path = astar.find_path(start, goal, 0, Some(100));
+        assert!(path.is_some());
+
+        let path = path.unwrap();
+        assert_eq!(path.len(), 10);
+    }
+
+    // ==================== find_path Edge Cases ====================
+
+    #[test]
+    fn test_path_invalid_start() {
+        let grid = Grid::new(5, 5);
+        let astar = AStar::new(grid);
+
+        let start = Point::new(-1.0, 0.0);
+        let goal = Point::new(4.0, 4.0);
+
+        let path = astar.find_path(start, goal, 0, Some(100));
+        assert!(path.is_none());
+    }
+
+    #[test]
+    fn test_path_invalid_goal() {
+        let grid = Grid::new(5, 5);
+        let astar = AStar::new(grid);
+
+        let start = Point::new(0.0, 0.0);
+        let goal = Point::new(10.0, 10.0);
+
+        let path = astar.find_path(start, goal, 0, Some(100));
+        assert!(path.is_none());
+    }
+
+    #[test]
+    fn test_path_start_on_obstacle() {
+        let mut grid = Grid::new(5, 5);
+        grid.set_obstacle(0, 0, true);
+        let astar = AStar::new(grid);
+
+        let start = Point::new(0.0, 0.0);
+        let goal = Point::new(4.0, 4.0);
+
+        let path = astar.find_path(start, goal, 0, Some(100));
+        assert!(path.is_none());
+    }
+
+    #[test]
+    fn test_path_goal_on_obstacle() {
+        let mut grid = Grid::new(5, 5);
+        grid.set_obstacle(4, 4, true);
+        let astar = AStar::new(grid);
+
+        let start = Point::new(0.0, 0.0);
+        let goal = Point::new(4.0, 4.0);
+
+        let path = astar.find_path(start, goal, 0, Some(100));
+        assert!(path.is_none());
+    }
+
+    #[test]
+    fn test_path_unreachable_surrounded() {
+        let mut grid = Grid::new(5, 5);
+        // Surround goal with obstacles
+        grid.set_obstacle(3, 3, true);
+        grid.set_obstacle(3, 4, true);
+        grid.set_obstacle(4, 3, true);
+        let astar = AStar::new(grid);
+
+        let start = Point::new(0.0, 0.0);
+        let goal = Point::new(4.0, 4.0);
+
+        let path = astar.find_path(start, goal, 0, Some(100));
+        assert!(path.is_none());
+    }
+
+    // ==================== find_path with Obstacles ====================
 
     #[test]
     fn test_path_with_obstacles() {
@@ -185,18 +439,40 @@ mod tests {
         grid.set_obstacle(2, 2, true);
         grid.set_obstacle(2, 1, true);
         grid.set_obstacle(2, 3, true);
-        
+
         let astar = AStar::new(grid);
         let start = Point::new(0.0, 2.0);
         let goal = Point::new(4.0, 2.0);
-        
+
         let path = astar.find_path(start, goal, 0, Some(100));
         assert!(path.is_some());
-        
+
         // Path should go around the obstacles
         let path = path.unwrap();
         assert!(path.len() > 5); // Should be longer than direct path
     }
+
+    #[test]
+    fn test_path_around_wall() {
+        let mut grid = Grid::new(10, 10);
+        // Create a wall from (5, 0) to (5, 8)
+        for y in 0..9 {
+            grid.set_obstacle(5, y, true);
+        }
+
+        let astar = AStar::new(grid);
+        let start = Point::new(0.0, 5.0);
+        let goal = Point::new(9.0, 5.0);
+
+        let path = astar.find_path(start, goal, 0, Some(200));
+        assert!(path.is_some());
+
+        let path = path.unwrap();
+        // Must go around the wall
+        assert!(path.len() > 10);
+    }
+
+    // ==================== find_path with Constraints ====================
 
     #[test]
     fn test_path_with_constraints() {
@@ -205,16 +481,174 @@ mod tests {
             Constraint::new(0, (1, 0), 1),
             Constraint::new(0, (2, 0), 2),
         ];
-        
+
         let astar = AStar::with_constraints(grid, &constraints, 0);
         let start = Point::new(0.0, 0.0);
         let goal = Point::new(4.0, 0.0);
-        
+
         let path = astar.find_path(start, goal, 0, Some(100));
         assert!(path.is_some());
-        
+
         // Should find alternative path avoiding constraints
         let path = path.unwrap();
         assert!(path.len() > 5);
+    }
+
+    #[test]
+    fn test_path_constraints_different_agent_ignored() {
+        let grid = Grid::new(5, 5);
+        // These constraints are for agent 1, not agent 0
+        let constraints = vec![
+            Constraint::new(1, (1, 0), 1),
+            Constraint::new(1, (2, 0), 2),
+            Constraint::new(1, (3, 0), 3),
+        ];
+
+        let astar = AStar::with_constraints(grid, &constraints, 0);
+        let start = Point::new(0.0, 0.0);
+        let goal = Point::new(4.0, 0.0);
+
+        let path = astar.find_path(start, goal, 0, Some(100));
+        assert!(path.is_some());
+
+        // Should take direct path since constraints don't apply
+        let path = path.unwrap();
+        assert_eq!(path.len(), 5);
+    }
+
+    #[test]
+    fn test_path_multiple_time_constraints() {
+        let grid = Grid::new(5, 1);
+        // Block straight path at various times
+        let constraints = vec![
+            Constraint::new(0, (1, 0), 1),
+            Constraint::new(0, (2, 0), 2),
+            Constraint::new(0, (3, 0), 3),
+        ];
+
+        let astar = AStar::with_constraints(grid, &constraints, 0);
+        let start = Point::new(0.0, 0.0);
+        let goal = Point::new(4.0, 0.0);
+
+        let path = astar.find_path(start, goal, 0, Some(100));
+        assert!(path.is_some());
+
+        // Agent must wait or find alternative timing
+        let path = path.unwrap();
+        assert!(path.len() > 5);
+    }
+
+    // ==================== find_path Max Time Steps ====================
+
+    #[test]
+    fn test_path_max_time_exceeded() {
+        let grid = Grid::new(10, 10);
+        let astar = AStar::new(grid);
+
+        let start = Point::new(0.0, 0.0);
+        let goal = Point::new(9.0, 9.0);
+
+        // Very short max time
+        let path = astar.find_path(start, goal, 0, Some(5));
+        // Should fail because goal is too far
+        assert!(path.is_none());
+    }
+
+    #[test]
+    fn test_path_exact_max_time() {
+        let grid = Grid::new(5, 1);
+        let astar = AStar::new(grid);
+
+        let start = Point::new(0.0, 0.0);
+        let goal = Point::new(4.0, 0.0);
+
+        // Exactly enough time
+        let path = astar.find_path(start, goal, 0, Some(4));
+        assert!(path.is_some());
+    }
+
+    // ==================== find_single_agent_path Tests ====================
+
+    #[test]
+    fn test_find_single_agent_path_basic() {
+        let grid = Grid::new(10, 10);
+        let constraints: Vec<Constraint> = vec![];
+
+        let start = Point::new(0.0, 0.0);
+        let goal = Point::new(5.0, 5.0);
+
+        let path = find_single_agent_path(&grid, start, goal, &constraints, 0);
+        assert!(path.is_some());
+
+        let path = path.unwrap();
+        assert_eq!(path.first().unwrap(), &start);
+        assert_eq!(path.last().unwrap(), &goal);
+    }
+
+    #[test]
+    fn test_find_single_agent_path_with_constraints() {
+        let grid = Grid::new(10, 10);
+        let constraints = vec![
+            Constraint::new(0, (1, 0), 1),
+            Constraint::new(0, (0, 1), 1),
+        ];
+
+        let start = Point::new(0.0, 0.0);
+        let goal = Point::new(5.0, 5.0);
+
+        let path = find_single_agent_path(&grid, start, goal, &constraints, 0);
+        assert!(path.is_some());
+    }
+
+    #[test]
+    fn test_find_single_agent_path_with_obstacles() {
+        let mut grid = Grid::new(10, 10);
+        grid.set_obstacle(1, 0, true);
+        grid.set_obstacle(0, 1, true);
+        grid.set_obstacle(1, 1, true);
+
+        let constraints: Vec<Constraint> = vec![];
+        let start = Point::new(0.0, 0.0);
+        let goal = Point::new(5.0, 5.0);
+
+        let path = find_single_agent_path(&grid, start, goal, &constraints, 0);
+        // Should be unreachable - start is surrounded
+        assert!(path.is_none());
+    }
+
+    // ==================== Large Grid Tests ====================
+
+    #[test]
+    fn test_path_large_grid() {
+        let grid = Grid::new(50, 50);
+        let astar = AStar::new(grid);
+
+        let start = Point::new(0.0, 0.0);
+        let goal = Point::new(49.0, 49.0);
+
+        let path = astar.find_path(start, goal, 0, Some(200));
+        assert!(path.is_some());
+
+        let path = path.unwrap();
+        assert_eq!(path.first().unwrap(), &start);
+        assert_eq!(path.last().unwrap(), &goal);
+    }
+
+    #[test]
+    fn test_path_large_grid_with_maze() {
+        let mut grid = Grid::new(20, 20);
+        // Create a simple maze pattern
+        for i in 0..18 {
+            grid.set_obstacle(5, i, true);
+            grid.set_obstacle(10, 19 - i, true);
+            grid.set_obstacle(15, i, true);
+        }
+
+        let astar = AStar::new(grid);
+        let start = Point::new(0.0, 10.0);
+        let goal = Point::new(19.0, 10.0);
+
+        let path = astar.find_path(start, goal, 0, Some(500));
+        assert!(path.is_some());
     }
 }

@@ -262,6 +262,236 @@ pub fn compute_orca_velocity(
 mod tests {
     use super::*;
 
+    // ==================== Constructor Tests ====================
+
+    #[test]
+    fn test_orca_simulator_new() {
+        let sim = ORCASimulator::new();
+        assert_eq!(sim.time_horizon, 1.5);
+        assert_eq!(sim.neighbor_distance, 8.0);
+        assert_eq!(sim.max_neighbors, 10);
+    }
+
+    #[test]
+    fn test_orca_simulator_with_params() {
+        let sim = ORCASimulator::with_params(3.0, 15.0, 20);
+        assert_eq!(sim.time_horizon, 3.0);
+        assert_eq!(sim.neighbor_distance, 15.0);
+        assert_eq!(sim.max_neighbors, 20);
+    }
+
+    // ==================== get_relevant_neighbors Tests ====================
+
+    #[test]
+    fn test_get_relevant_neighbors_empty() {
+        let sim = ORCASimulator::new();
+        let agent = AgentState::new(
+            0,
+            Point::new(0.0, 0.0),
+            Vector2D::new(0.0, 0.0),
+            0.5,
+            Vector2D::new(1.0, 0.0),
+            1.5,
+        );
+        let neighbors: Vec<&AgentState> = vec![];
+
+        let relevant = sim.get_relevant_neighbors(&agent, &neighbors);
+        assert!(relevant.is_empty());
+    }
+
+    #[test]
+    fn test_get_relevant_neighbors_filters_self() {
+        let sim = ORCASimulator::new();
+        let agent = AgentState::new(
+            0,
+            Point::new(0.0, 0.0),
+            Vector2D::new(0.0, 0.0),
+            0.5,
+            Vector2D::new(1.0, 0.0),
+            1.5,
+        );
+        let neighbors = vec![&agent]; // Self is in the list
+
+        let relevant = sim.get_relevant_neighbors(&agent, &neighbors);
+        assert!(relevant.is_empty());
+    }
+
+    #[test]
+    fn test_get_relevant_neighbors_filters_by_distance() {
+        let sim = ORCASimulator::with_params(2.0, 5.0, 10);
+        let agent = AgentState::new(
+            0,
+            Point::new(0.0, 0.0),
+            Vector2D::new(0.0, 0.0),
+            0.5,
+            Vector2D::new(1.0, 0.0),
+            1.5,
+        );
+        let close_neighbor = AgentState::new(
+            1,
+            Point::new(3.0, 0.0), // Within 5.0
+            Vector2D::new(0.0, 0.0),
+            0.5,
+            Vector2D::new(-1.0, 0.0),
+            1.5,
+        );
+        let far_neighbor = AgentState::new(
+            2,
+            Point::new(10.0, 0.0), // Beyond 5.0
+            Vector2D::new(0.0, 0.0),
+            0.5,
+            Vector2D::new(-1.0, 0.0),
+            1.5,
+        );
+        let neighbors = vec![&close_neighbor, &far_neighbor];
+
+        let relevant = sim.get_relevant_neighbors(&agent, &neighbors);
+        assert_eq!(relevant.len(), 1);
+        assert_eq!(relevant[0].id, 1);
+    }
+
+    #[test]
+    fn test_get_relevant_neighbors_limits_count() {
+        let sim = ORCASimulator::with_params(2.0, 100.0, 2); // Max 2 neighbors
+        let agent = AgentState::new(
+            0,
+            Point::new(0.0, 0.0),
+            Vector2D::new(0.0, 0.0),
+            0.5,
+            Vector2D::new(1.0, 0.0),
+            1.5,
+        );
+        let n1 = AgentState::new(1, Point::new(1.0, 0.0), Vector2D::new(0.0, 0.0), 0.5, Vector2D::new(0.0, 0.0), 1.5);
+        let n2 = AgentState::new(2, Point::new(2.0, 0.0), Vector2D::new(0.0, 0.0), 0.5, Vector2D::new(0.0, 0.0), 1.5);
+        let n3 = AgentState::new(3, Point::new(3.0, 0.0), Vector2D::new(0.0, 0.0), 0.5, Vector2D::new(0.0, 0.0), 1.5);
+        let n4 = AgentState::new(4, Point::new(4.0, 0.0), Vector2D::new(0.0, 0.0), 0.5, Vector2D::new(0.0, 0.0), 1.5);
+        let neighbors = vec![&n3, &n1, &n4, &n2];
+
+        let relevant = sim.get_relevant_neighbors(&agent, &neighbors);
+        assert_eq!(relevant.len(), 2);
+        // Should be sorted by distance, so closest first
+        assert_eq!(relevant[0].id, 1);
+        assert_eq!(relevant[1].id, 2);
+    }
+
+    // ==================== compute_orca_lines Tests ====================
+
+    #[test]
+    fn test_compute_orca_lines_empty() {
+        let sim = ORCASimulator::new();
+        let agent = AgentState::new(
+            0,
+            Point::new(0.0, 0.0),
+            Vector2D::new(0.0, 0.0),
+            0.5,
+            Vector2D::new(1.0, 0.0),
+            1.5,
+        );
+        let neighbors: Vec<&AgentState> = vec![];
+
+        let lines = sim.compute_orca_lines(&agent, &neighbors);
+        assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn test_compute_orca_lines_with_neighbor() {
+        let sim = ORCASimulator::new();
+        let agent = AgentState::new(
+            0,
+            Point::new(0.0, 0.0),
+            Vector2D::new(1.0, 0.0),
+            0.5,
+            Vector2D::new(1.0, 0.0),
+            1.5,
+        );
+        let neighbor = AgentState::new(
+            1,
+            Point::new(5.0, 0.0),
+            Vector2D::new(-1.0, 0.0),
+            0.5,
+            Vector2D::new(-1.0, 0.0),
+            1.5,
+        );
+        let neighbors = vec![&neighbor];
+
+        let lines = sim.compute_orca_lines(&agent, &neighbors);
+        assert_eq!(lines.len(), 1);
+    }
+
+    // ==================== compute_velocity Tests ====================
+
+    #[test]
+    fn test_compute_velocity_no_neighbors() {
+        let sim = ORCASimulator::new();
+        let agent = AgentState::new(
+            0,
+            Point::new(0.0, 0.0),
+            Vector2D::new(0.0, 0.0),
+            0.5,
+            Vector2D::new(1.0, 0.0),
+            2.0,
+        );
+        let neighbors: Vec<&AgentState> = vec![];
+
+        let velocity = sim.compute_velocity(&agent, &neighbors);
+        // Should return preferred velocity
+        assert!((velocity.x - 1.0).abs() < 0.1);
+        assert!(velocity.y.abs() < 0.1);
+    }
+
+    #[test]
+    fn test_compute_velocity_respects_max_speed() {
+        let sim = ORCASimulator::new();
+        let agent = AgentState::new(
+            0,
+            Point::new(0.0, 0.0),
+            Vector2D::new(0.0, 0.0),
+            0.5,
+            Vector2D::new(10.0, 0.0), // Fast preferred velocity
+            2.0, // Max speed is 2.0
+        );
+        let neighbors: Vec<&AgentState> = vec![];
+
+        let velocity = sim.compute_velocity(&agent, &neighbors);
+        assert!(velocity.magnitude() <= 2.0 + EPSILON);
+    }
+
+    // ==================== det Function Tests ====================
+
+    #[test]
+    fn test_det_function() {
+        let v1 = Vector2D::new(1.0, 0.0);
+        let v2 = Vector2D::new(0.0, 1.0);
+        assert!((det(&v1, &v2) - 1.0).abs() < EPSILON);
+
+        let v3 = Vector2D::new(1.0, 1.0);
+        let v4 = Vector2D::new(1.0, -1.0);
+        assert!((det(&v3, &v4) - (-2.0)).abs() < EPSILON);
+    }
+
+    #[test]
+    fn test_det_zero_vectors() {
+        let v1 = Vector2D::new(0.0, 0.0);
+        let v2 = Vector2D::new(1.0, 1.0);
+        assert_eq!(det(&v1, &v2), 0.0);
+    }
+
+    #[test]
+    fn test_det_parallel_vectors() {
+        let v1 = Vector2D::new(2.0, 4.0);
+        let v2 = Vector2D::new(1.0, 2.0);
+        assert_eq!(det(&v1, &v2), 0.0);
+    }
+
+    #[test]
+    fn test_det_antiparallel_vectors() {
+        let v1 = Vector2D::new(2.0, 4.0);
+        let v2 = Vector2D::new(-1.0, -2.0);
+        assert_eq!(det(&v1, &v2), 0.0);
+    }
+
+    // ==================== compute_orca_velocity Integration Tests ====================
+
     #[test]
     fn test_no_neighbors() {
         let agent = AgentState::new(
@@ -272,10 +502,10 @@ mod tests {
             Vector2D::new(1.0, 0.0),
             2.0,
         );
-        
+
         let neighbors = vec![];
         let result = compute_orca_velocity(&agent, &neighbors, 2.0);
-        
+
         // Should return preferred velocity
         assert!((result.x - 1.0).abs() < EPSILON);
         assert!((result.y - 0.0).abs() < EPSILON);
@@ -291,7 +521,7 @@ mod tests {
             Vector2D::new(1.0, 0.0),
             2.0,
         );
-        
+
         let agent2 = AgentState::new(
             1,
             Point::new(5.0, 0.0),
@@ -300,10 +530,10 @@ mod tests {
             Vector2D::new(-1.0, 0.0),
             2.0,
         );
-        
+
         let neighbors = vec![&agent2];
         let result = compute_orca_velocity(&agent1, &neighbors, 2.0);
-        
+
         // Should deviate from straight path
         assert!(result.y.abs() > EPSILON || result.x < 1.0);
     }
@@ -318,23 +548,193 @@ mod tests {
             Vector2D::new(5.0, 0.0), // Preferred velocity exceeds max speed
             2.0, // Max speed
         );
-        
+
         let neighbors = vec![];
         let result = compute_orca_velocity(&agent, &neighbors, 2.0);
-        
+
         // Should be clamped to max speed
         assert!(result.magnitude() <= 2.0 + EPSILON);
         assert!((result.magnitude() - 2.0).abs() < EPSILON);
     }
 
     #[test]
-    fn test_det_function() {
-        let v1 = Vector2D::new(1.0, 0.0);
-        let v2 = Vector2D::new(0.0, 1.0);
-        assert!((det(&v1, &v2) - 1.0).abs() < EPSILON);
-        
-        let v3 = Vector2D::new(1.0, 1.0);
-        let v4 = Vector2D::new(1.0, -1.0);
-        assert!((det(&v3, &v4) - (-2.0)).abs() < EPSILON);
+    fn test_perpendicular_agents() {
+        let agent1 = AgentState::new(
+            0,
+            Point::new(0.0, 0.0),
+            Vector2D::new(1.0, 0.0),
+            0.5,
+            Vector2D::new(1.0, 0.0),
+            2.0,
+        );
+
+        let agent2 = AgentState::new(
+            1,
+            Point::new(3.0, 3.0),
+            Vector2D::new(0.0, -1.0),
+            0.5,
+            Vector2D::new(0.0, -1.0),
+            2.0,
+        );
+
+        let neighbors = vec![&agent2];
+        let result = compute_orca_velocity(&agent1, &neighbors, 2.0);
+
+        // Should still produce a valid velocity
+        assert!(result.magnitude() <= 2.0 + EPSILON);
+    }
+
+    #[test]
+    fn test_multiple_neighbors() {
+        let agent = AgentState::new(
+            0,
+            Point::new(5.0, 5.0),
+            Vector2D::new(0.0, 0.0),
+            0.5,
+            Vector2D::new(1.0, 0.0),
+            2.0,
+        );
+
+        let n1 = AgentState::new(1, Point::new(6.0, 5.0), Vector2D::new(-0.5, 0.0), 0.5, Vector2D::new(-1.0, 0.0), 2.0);
+        let n2 = AgentState::new(2, Point::new(5.0, 6.0), Vector2D::new(0.0, -0.5), 0.5, Vector2D::new(0.0, -1.0), 2.0);
+        let n3 = AgentState::new(3, Point::new(4.0, 5.0), Vector2D::new(0.5, 0.0), 0.5, Vector2D::new(1.0, 0.0), 2.0);
+
+        let neighbors = vec![&n1, &n2, &n3];
+        let result = compute_orca_velocity(&agent, &neighbors, 2.0);
+
+        // Should produce a valid velocity that avoids all neighbors
+        assert!(result.magnitude() <= 2.0 + EPSILON);
+    }
+
+    #[test]
+    fn test_stationary_agent() {
+        let agent = AgentState::new(
+            0,
+            Point::new(0.0, 0.0),
+            Vector2D::new(0.0, 0.0),
+            0.5,
+            Vector2D::new(0.0, 0.0), // No preferred velocity
+            2.0,
+        );
+
+        let neighbor = AgentState::new(
+            1,
+            Point::new(2.0, 0.0),
+            Vector2D::new(-1.0, 0.0),
+            0.5,
+            Vector2D::new(-1.0, 0.0),
+            2.0,
+        );
+
+        let neighbors = vec![&neighbor];
+        let result = compute_orca_velocity(&agent, &neighbors, 2.0);
+
+        // Should still produce a valid velocity
+        assert!(result.magnitude() <= 2.0 + EPSILON);
+    }
+
+    #[test]
+    fn test_zero_max_speed() {
+        let agent = AgentState::new(
+            0,
+            Point::new(0.0, 0.0),
+            Vector2D::new(0.0, 0.0),
+            0.5,
+            Vector2D::new(1.0, 0.0),
+            0.0, // Zero max speed
+        );
+
+        let neighbors: Vec<&AgentState> = vec![];
+        let result = compute_orca_velocity(&agent, &neighbors, 2.0);
+
+        // Should return zero velocity
+        assert!(result.magnitude() < EPSILON);
+    }
+
+    #[test]
+    fn test_very_close_neighbors() {
+        let agent = AgentState::new(
+            0,
+            Point::new(0.0, 0.0),
+            Vector2D::new(0.0, 0.0),
+            0.5,
+            Vector2D::new(1.0, 0.0),
+            2.0,
+        );
+
+        // Neighbor very close (but not overlapping)
+        let neighbor = AgentState::new(
+            1,
+            Point::new(1.1, 0.0), // Just outside combined radius
+            Vector2D::new(-1.0, 0.0),
+            0.5,
+            Vector2D::new(-1.0, 0.0),
+            2.0,
+        );
+
+        let neighbors = vec![&neighbor];
+        let result = compute_orca_velocity(&agent, &neighbors, 2.0);
+
+        // Should produce a valid velocity
+        assert!(result.magnitude() <= 2.0 + EPSILON);
+    }
+
+    #[test]
+    fn test_overlapping_agents() {
+        let agent = AgentState::new(
+            0,
+            Point::new(0.0, 0.0),
+            Vector2D::new(0.0, 0.0),
+            0.5,
+            Vector2D::new(1.0, 0.0),
+            2.0,
+        );
+
+        // Overlapping neighbor
+        let neighbor = AgentState::new(
+            1,
+            Point::new(0.5, 0.0), // Within combined radius
+            Vector2D::new(0.0, 0.0),
+            0.5,
+            Vector2D::new(-1.0, 0.0),
+            2.0,
+        );
+
+        let neighbors = vec![&neighbor];
+        let result = compute_orca_velocity(&agent, &neighbors, 2.0);
+
+        // Should produce a valid velocity (collision handling)
+        assert!(result.magnitude() <= 2.0 + EPSILON);
+    }
+
+    #[test]
+    fn test_different_time_horizons() {
+        let agent = AgentState::new(
+            0,
+            Point::new(0.0, 0.0),
+            Vector2D::new(1.0, 0.0),
+            0.5,
+            Vector2D::new(1.0, 0.0),
+            2.0,
+        );
+
+        let neighbor = AgentState::new(
+            1,
+            Point::new(5.0, 0.0),
+            Vector2D::new(-1.0, 0.0),
+            0.5,
+            Vector2D::new(-1.0, 0.0),
+            2.0,
+        );
+
+        let neighbors = vec![&neighbor];
+
+        // Different time horizons should give different results
+        let result_short = compute_orca_velocity(&agent, &neighbors, 0.5);
+        let result_long = compute_orca_velocity(&agent, &neighbors, 5.0);
+
+        // Both should be valid velocities
+        assert!(result_short.magnitude() <= 2.0 + EPSILON);
+        assert!(result_long.magnitude() <= 2.0 + EPSILON);
     }
 }
