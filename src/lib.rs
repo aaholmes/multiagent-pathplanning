@@ -4,13 +4,13 @@ use std::collections::HashMap;
 mod structs;
 mod astar;
 mod cbs;
-mod orca;
-mod orca_correct;
+mod orca;          // Correct ORCA from original paper with QP optimization
+mod orca_simple;   // Simple greedy projection (approximate but faster)
 
 use structs::*;
 use cbs::solve_cbs;
-use orca::compute_orca_velocity;
-use orca_correct::compute_new_velocity as compute_orca_correct;
+use orca::compute_new_velocity as compute_orca_correct;
+use orca_simple::compute_orca_velocity as compute_orca_simple;
 
 #[pyfunction]
 fn solve_cbs_py(grid: Grid, tasks: Vec<Task>) -> PyResult<Option<HashMap<usize, Vec<Point>>>> {
