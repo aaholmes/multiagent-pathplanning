@@ -575,7 +575,7 @@ fn solve_3d_linear_program_fallback(orca_lines: &[OrcaLine], max_speed: f64) -> 
     };
 
     // Helper to try a candidate and update best if better
-    let mut try_candidate = |candidate: Vector2D, best_v: &mut Vector2D, min_viol: &mut f64| {
+    let try_candidate = |candidate: Vector2D, best_v: &mut Vector2D, min_viol: &mut f64| {
         if candidate.magnitude() <= max_speed + EPSILON {
             let violation = compute_violation(candidate);
             if violation < *min_viol {

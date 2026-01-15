@@ -27,7 +27,6 @@ mod orca_simple;   // Simple greedy projection (approximate but faster)
 use structs::*;
 use cbs::solve_cbs;
 use orca::compute_new_velocity as compute_orca_correct;
-use orca_simple::compute_orca_velocity as compute_orca_simple;
 
 #[pyfunction]
 fn solve_cbs_py(grid: Grid, tasks: Vec<Task>) -> PyResult<Option<HashMap<usize, Vec<Point>>>> {
@@ -169,97 +168,82 @@ fn navigation_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     Ok(())
 }
 
-// Alias functions for backwards compatibility and convenience
-#[pyfunction]
-fn solve_cbs_wrapper(grid: Grid, tasks: Vec<Task>) -> PyResult<Option<HashMap<usize, Vec<Point>>>> {
-    solve_cbs_py(grid, tasks)
-}
-
-#[pyfunction]
-fn compute_orca_wrapper(
-    agent: &AgentState,
-    neighbors: Vec<AgentState>,
-    time_horizon: Option<f64>,
-) -> PyResult<Vector2D> {
-    let th = time_horizon.unwrap_or(2.0);
-    compute_orca_velocity_py(agent, neighbors, th)
-}
-
-// Internal helper functions for testing (non-PyO3)
-fn compute_path_length(path: &[Point]) -> f64 {
-    if path.len() < 2 {
-        return 0.0;
-    }
-    let mut total_length = 0.0;
-    for i in 1..path.len() {
-        total_length += path[i - 1].distance(&path[i]);
-    }
-    total_length
-}
-
-fn compute_solution_cost(solution: &HashMap<usize, Vec<Point>>) -> f64 {
-    solution.values().map(|path| compute_path_length(path)).sum()
-}
-
-fn is_solution_valid(solution: &HashMap<usize, Vec<Point>>, tasks: &[Task]) -> bool {
-    for task in tasks {
-        if let Some(path) = solution.get(&task.agent_id) {
-            if path.is_empty() {
-                return false;
-            }
-            let start_dist = path[0].distance(&task.start);
-            if start_dist > 1.0 {
-                return false;
-            }
-            let goal_dist = path.last().unwrap().distance(&task.goal);
-            if goal_dist > 1.0 {
-                return false;
-            }
-        } else {
-            return false;
-        }
-    }
-    true
-}
-
-fn create_simple_scenario_internal(width: usize, height: usize) -> (Grid, Vec<Task>) {
-    let grid = Grid::new(width, height);
-    let tasks = vec![
-        Task::new(0, Point::new(0.0, 0.0), Point::new((width - 1) as f64, 0.0)),
-        Task::new(1, Point::new((width - 1) as f64, 0.0), Point::new(0.0, 0.0)),
-    ];
-    (grid, tasks)
-}
-
-fn create_four_corner_scenario_internal(width: usize, height: usize) -> (Grid, Vec<Task>) {
-    let grid = Grid::new(width, height);
-    let w = (width - 1) as f64;
-    let h = (height - 1) as f64;
-    let tasks = vec![
-        Task::new(0, Point::new(0.0, 0.0), Point::new(w, h)),
-        Task::new(1, Point::new(w, 0.0), Point::new(0.0, h)),
-        Task::new(2, Point::new(w, h), Point::new(0.0, 0.0)),
-        Task::new(3, Point::new(0.0, h), Point::new(w, 0.0)),
-    ];
-    (grid, tasks)
-}
-
-fn add_random_obstacles_internal(grid: &mut Grid, obstacle_count: usize, seed: u64) {
-    let mut rng_state = seed;
-    for _ in 0..obstacle_count {
-        rng_state = (1664525_u64.wrapping_mul(rng_state).wrapping_add(1013904223)) % (1 << 32);
-        let x = (rng_state % grid.width as u64) as usize;
-        rng_state = (1664525_u64.wrapping_mul(rng_state).wrapping_add(1013904223)) % (1 << 32);
-        let y = (rng_state % grid.height as u64) as usize;
-        if !((x == 0 || x == grid.width - 1) && (y == 0 || y == grid.height - 1)) {
-            grid.set_obstacle(x, y, true);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- Test helper functions (internal only) ---
+
+    fn compute_path_length(path: &[Point]) -> f64 {
+        if path.len() < 2 {
+            return 0.0;
+        }
+        let mut total_length = 0.0;
+        for i in 1..path.len() {
+            total_length += path[i - 1].distance(&path[i]);
+        }
+        total_length
+    }
+
+    fn compute_solution_cost(solution: &HashMap<usize, Vec<Point>>) -> f64 {
+        solution.values().map(|path| compute_path_length(path)).sum()
+    }
+
+    fn is_solution_valid(solution: &HashMap<usize, Vec<Point>>, tasks: &[Task]) -> bool {
+        for task in tasks {
+            if let Some(path) = solution.get(&task.agent_id) {
+                if path.is_empty() {
+                    return false;
+                }
+                let start_dist = path[0].distance(&task.start);
+                if start_dist > 1.0 {
+                    return false;
+                }
+                let goal_dist = path.last().unwrap().distance(&task.goal);
+                if goal_dist > 1.0 {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn create_simple_scenario_internal(width: usize, height: usize) -> (Grid, Vec<Task>) {
+        let grid = Grid::new(width, height);
+        let tasks = vec![
+            Task::new(0, Point::new(0.0, 0.0), Point::new((width - 1) as f64, 0.0)),
+            Task::new(1, Point::new((width - 1) as f64, 0.0), Point::new(0.0, 0.0)),
+        ];
+        (grid, tasks)
+    }
+
+    fn create_four_corner_scenario_internal(width: usize, height: usize) -> (Grid, Vec<Task>) {
+        let grid = Grid::new(width, height);
+        let w = (width - 1) as f64;
+        let h = (height - 1) as f64;
+        let tasks = vec![
+            Task::new(0, Point::new(0.0, 0.0), Point::new(w, h)),
+            Task::new(1, Point::new(w, 0.0), Point::new(0.0, h)),
+            Task::new(2, Point::new(w, h), Point::new(0.0, 0.0)),
+            Task::new(3, Point::new(0.0, h), Point::new(w, 0.0)),
+        ];
+        (grid, tasks)
+    }
+
+    fn add_random_obstacles_internal(grid: &mut Grid, obstacle_count: usize, seed: u64) {
+        let mut rng_state = seed;
+        for _ in 0..obstacle_count {
+            rng_state = (1664525_u64.wrapping_mul(rng_state).wrapping_add(1013904223)) % (1 << 32);
+            let x = (rng_state % grid.width as u64) as usize;
+            rng_state = (1664525_u64.wrapping_mul(rng_state).wrapping_add(1013904223)) % (1 << 32);
+            let y = (rng_state % grid.height as u64) as usize;
+            if !((x == 0 || x == grid.width - 1) && (y == 0 || y == grid.height - 1)) {
+                grid.set_obstacle(x, y, true);
+            }
+        }
+    }
 
     // --- Tests for create_simple_scenario ---
 

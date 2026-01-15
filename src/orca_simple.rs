@@ -1,5 +1,7 @@
 //! # ORCA Simple - Fast Approximate Collision Avoidance
 //!
+#![allow(dead_code)] // Module is complete but not currently used by lib.rs
+//!
 //! This module provides a simplified, faster version of ORCA using greedy
 //! sequential projection instead of quadratic programming.
 //!
@@ -27,6 +29,10 @@
 use crate::structs::{AgentState, Vector2D, Point, Line};
 
 const EPSILON: f64 = 1e-10;
+
+fn det(vector1: &Vector2D, vector2: &Vector2D) -> f64 {
+    vector1.x * vector2.y - vector1.y * vector2.x
+}
 
 pub struct ORCASimulator {
     time_horizon: f64,
@@ -271,22 +277,19 @@ impl ORCASimulator {
     }
 }
 
-fn det(vector1: &Vector2D, vector2: &Vector2D) -> f64 {
-    vector1.x * vector2.y - vector1.y * vector2.x
-}
-
-pub fn compute_orca_velocity(
-    agent: &AgentState,
-    neighbors: &[&AgentState],
-    time_horizon: f64,
-) -> Vector2D {
-    let simulator = ORCASimulator::with_params(time_horizon, 10.0, 10);
-    simulator.compute_velocity(agent, neighbors)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Test helper function
+    fn compute_orca_velocity(
+        agent: &AgentState,
+        neighbors: &[&AgentState],
+        time_horizon: f64,
+    ) -> Vector2D {
+        let simulator = ORCASimulator::with_params(time_horizon, 10.0, 10);
+        simulator.compute_velocity(agent, neighbors)
+    }
 
     // ==================== Constructor Tests ====================
 
