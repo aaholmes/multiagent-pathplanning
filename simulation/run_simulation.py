@@ -27,39 +27,31 @@ def run_simulation_with_visualization(config_or_scenario, real_time=False, save_
     # Create simulator
     simulator = Simulator(config)
     
-    # Set up visualization
+    # Set up visualization. States are collected during the single run in
+    # both modes (re-running the simulation for visualization would double the
+    # cost and, with CBS tie-breaking, could produce a different rollout).
     visualizer = Visualizer(config)
     states_history = []
-    
+
     if real_time:
-        # Real-time visualization callback
         def step_callback(state):
             visualizer.update_visualization(state)
             states_history.append(state)
             time.sleep(0.05)  # Small delay for visualization
-        
-        simulator.set_step_callback(step_callback)
-    
+    else:
+        def step_callback(state):
+            states_history.append(state)
+
+    simulator.set_step_callback(step_callback)
+
     print("Starting simulation...")
     start_time = time.time()
-    
+
     # Run simulation
     final_state = simulator.run()
-    
+
     end_time = time.time()
     print(f"Simulation completed in {end_time - start_time:.2f} seconds")
-    
-    # If not real-time, we need to run again to collect states for visualization
-    if not real_time:
-        print("Collecting states for visualization...")
-        simulator_viz = Simulator(config)
-        states_history = []
-        
-        def collect_states(state):
-            states_history.append(state)
-        
-        simulator_viz.set_step_callback(collect_states)
-        simulator_viz.run()
     
     # Get statistics
     stats = simulator.get_statistics(final_state)

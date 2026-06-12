@@ -75,13 +75,29 @@ class Simulator:
         
         return True
     
+    def _has_line_of_sight(self, a: navigation_core.Point, b: navigation_core.Point) -> bool:
+        """True if the straight segment a->b stays clear of obstacle cells."""
+        delta = b - a
+        length = delta.magnitude()
+        if length < 1e-9:
+            return True
+        steps = int(length / 0.25) + 1
+        for k in range(1, steps + 1):
+            t = k / steps
+            x, y = a.x + delta.x * t, a.y + delta.y * t
+            if self.grid.is_obstacle(int(round(x)), int(round(y))):
+                return False
+        return True
+
     def _get_preferred_velocity(self, agent: navigation_core.AgentState, current_time: float) -> navigation_core.Vector2D:
         """Compute preferred velocity for an agent based on its global path.
 
-        Progress along the path is tracked with a monotone waypoint index. A
-        closest-waypoint search would re-target earlier or later detour
-        waypoints whenever ORCA pushes the agent off its path, which can stall
-        an agent indefinitely.
+        Progress along the path is tracked with a monotone waypoint index
+        (a closest-waypoint search can re-target detour waypoints and stall).
+        The target then looks ahead past collinear waypoints - bounded by
+        line of sight, so the shortcut never cuts an obstacle corner - which
+        makes agents cut straight along grid-aligned runs instead of chasing
+        every intermediate cell.
         """
         if self.global_paths is None or agent.id not in self.global_paths:
             return navigation_core.Vector2D(0.0, 0.0)
@@ -90,17 +106,34 @@ class Simulator:
         if not path:
             return navigation_core.Vector2D(0.0, 0.0)
 
-        # Advance past waypoints the agent has effectively reached
+        # Advance the monotone index past every waypoint the agent has come
+        # close to (scanning forward, so ORCA displacement that skips an
+        # intermediate waypoint cannot stall progress).
         idx = self._waypoint_progress.get(agent.id, 0)
-        while idx < len(path) - 1 and agent.position.distance(path[idx]) < 0.6:
-            idx += 1
+        for j in range(idx, len(path)):
+            if agent.position.distance(path[j]) < 0.6 and j < len(path) - 1:
+                idx = j + 1
         self._waypoint_progress[agent.id] = idx
 
-        target = path[idx]
+        # Look ahead past collinear waypoints with line of sight.
+        target_idx = idx
+        if idx + 1 < len(path):
+            run = (round(path[idx + 1].x - path[idx].x), round(path[idx + 1].y - path[idx].y))
+            j = idx + 1
+            while self._has_line_of_sight(agent.position, path[j]):
+                target_idx = j
+                if j + 1 >= len(path):
+                    break
+                step = (round(path[j + 1].x - path[j].x), round(path[j + 1].y - path[j].y))
+                if step != run:
+                    break
+                j += 1
+
+        target = path[target_idx]
         direction = target - agent.position
 
         # At the final waypoint: stop once close enough
-        if idx == len(path) - 1 and direction.magnitude() < 0.2:
+        if target_idx == len(path) - 1 and direction.magnitude() < 0.2:
             return navigation_core.Vector2D(0.0, 0.0)
 
         # Normalize and scale by preferred speed (slightly less than max for smooth motion)

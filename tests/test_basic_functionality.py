@@ -136,7 +136,8 @@ def run_all_tests():
     try:
         test_data_structures()
         test_scenario_loading()
-        test_existing_scenarios()
+        if not test_existing_scenarios():
+            return False
         
         print("=" * 50)
         print("✓ All tests passed!")

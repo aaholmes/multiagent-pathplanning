@@ -46,6 +46,9 @@ jobs:
       - name: Run Python functionality tests
         run: python tests/test_basic_functionality.py
 
+      - name: Run Python test suite
+        run: pytest tests/test_python_layer.py -q
+
       - name: Verify import
         run: python test_basic_import.py
 

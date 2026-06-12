@@ -582,7 +582,7 @@ mod tests {
     #[test]
     fn test_point_clone() {
         let p1 = Point::new(1.0, 2.0);
-        let p2 = p1.clone();
+        let p2 = p1;
         assert_eq!(p1, p2);
     }
 

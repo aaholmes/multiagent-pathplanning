@@ -14,28 +14,45 @@
 //! Primarily used internally by CBS for finding individual agent paths.
 //! Call `find_single_agent_path` for standalone pathfinding.
 
-use crate::structs::{Point, Grid, Path, Constraint};
+use crate::structs::{Constraint, Grid, Path, Point};
 use ordered_float::OrderedFloat;
 use priority_queue::PriorityQueue;
-use std::collections::{HashMap, HashSet};
 use std::cmp::Reverse;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct AStarNode {
     position: (i32, i32),
     time_step: usize,
+    /// Direction of the last actual move; (0, 0) before the first move.
+    /// Carried unchanged through waits. Part of the state so that paths can
+    /// be tie-broken on turn count.
+    direction: (i32, i32),
 }
 
 impl AStarNode {
     fn new(position: (i32, i32), time_step: usize) -> Self {
-        AStarNode { position, time_step }
+        AStarNode {
+            position,
+            time_step,
+            direction: (0, 0),
+        }
     }
 }
+
+/// Cost added per direction change. Small enough that the accumulated
+/// penalty over any realistic path stays below one step cost, so the number
+/// of steps (and CBS optimality) is unaffected; among equal-length paths the
+/// straightest one wins, which keeps planned routes visually sensible.
+const TURN_PENALTY: f64 = 1e-3;
+
+/// (from, to, arrival time_step)
+type EdgeConstraintKey = ((i32, i32), (i32, i32), usize);
 
 pub struct AStar<'a> {
     grid: &'a Grid,
     vertex_constraints: HashSet<((i32, i32), usize)>, // (position, time_step)
-    edge_constraints: HashSet<((i32, i32), (i32, i32), usize)>, // (from, to, arrival time_step)
+    edge_constraints: HashSet<EdgeConstraintKey>,
 }
 
 impl<'a> AStar<'a> {
@@ -48,7 +65,7 @@ impl<'a> AStar<'a> {
     }
 
     pub fn with_constraints(grid: &'a Grid, constraints: &[Constraint], agent_id: usize) -> Self {
-        let mut astar = AStar::new(&grid);
+        let mut astar = AStar::new(grid);
         for constraint in constraints {
             if constraint.agent_id == agent_id {
                 match constraint.prev_position {
@@ -128,7 +145,10 @@ impl<'a> AStar<'a> {
         // avoids flooding the equal-f plateau between start and goal.
         open_set.push(
             start_node.clone(),
-            Reverse((OrderedFloat(self.heuristic(start_pos, goal_pos)), Reverse(0usize))),
+            Reverse((
+                OrderedFloat(self.heuristic(start_pos, goal_pos)),
+                Reverse(0usize),
+            )),
         );
 
         while let Some((current_node, _)) = open_set.pop() {
@@ -140,7 +160,9 @@ impl<'a> AStar<'a> {
                 continue;
             }
 
-            let neighbors = self.grid.get_neighbors(current_node.position.0, current_node.position.1);
+            let neighbors = self
+                .grid
+                .get_neighbors(current_node.position.0, current_node.position.1);
 
             // Add staying in place as an option
             let mut all_moves = neighbors;
@@ -148,14 +170,38 @@ impl<'a> AStar<'a> {
 
             for next_pos in all_moves {
                 let next_time = current_node.time_step + 1;
-                let next_node = AStarNode::new(next_pos, next_time);
 
                 // Check if this move is constrained
                 if self.is_constrained(current_node.position, next_pos, next_time) {
                     continue;
                 }
 
-                let tentative_g_score = g_score.get(&current_node).unwrap_or(&f64::INFINITY) + 1.0;
+                let is_wait = next_pos == current_node.position;
+                let move_direction = if is_wait {
+                    current_node.direction // waits keep the previous heading
+                } else {
+                    (
+                        next_pos.0 - current_node.position.0,
+                        next_pos.1 - current_node.position.1,
+                    )
+                };
+                let turn_cost = if !is_wait
+                    && current_node.direction != (0, 0)
+                    && move_direction != current_node.direction
+                {
+                    TURN_PENALTY
+                } else {
+                    0.0
+                };
+
+                let next_node = AStarNode {
+                    position: next_pos,
+                    time_step: next_time,
+                    direction: move_direction,
+                };
+
+                let tentative_g_score =
+                    g_score.get(&current_node).unwrap_or(&f64::INFINITY) + 1.0 + turn_cost;
 
                 let current_g = g_score.get(&next_node).unwrap_or(&f64::INFINITY);
                 if tentative_g_score < *current_g {
@@ -172,17 +218,29 @@ impl<'a> AStar<'a> {
         None
     }
 
-    fn reconstruct_path(&self, came_from: &HashMap<AStarNode, AStarNode>, current: &AStarNode, start: Point, goal: Point) -> Path {
+    fn reconstruct_path(
+        &self,
+        came_from: &HashMap<AStarNode, AStarNode>,
+        current: &AStarNode,
+        start: Point,
+        goal: Point,
+    ) -> Path {
         let mut path = Vec::new();
         let mut current_node = current;
 
         while let Some(parent) = came_from.get(current_node) {
-            path.push(Point::new(current_node.position.0 as f64, current_node.position.1 as f64));
+            path.push(Point::new(
+                current_node.position.0 as f64,
+                current_node.position.1 as f64,
+            ));
             current_node = parent;
         }
-        
+
         // Add the start position
-        path.push(Point::new(current_node.position.0 as f64, current_node.position.1 as f64));
+        path.push(Point::new(
+            current_node.position.0 as f64,
+            current_node.position.1 as f64,
+        ));
         path.reverse();
 
         // Ensure the path ends exactly at the goal
@@ -204,7 +262,7 @@ pub fn find_single_agent_path(
     constraints: &[Constraint],
     agent_id: usize,
 ) -> Option<Path> {
-    let astar = AStar::with_constraints(&grid, constraints, agent_id);
+    let astar = AStar::with_constraints(grid, constraints, agent_id);
     astar.find_path(start, goal, agent_id, Some(500))
 }
 
@@ -268,10 +326,7 @@ mod tests {
     #[test]
     fn test_astar_with_no_matching_constraints() {
         let grid = Grid::new(10, 10);
-        let constraints = vec![
-            Constraint::new(1, (1, 1), 1),
-            Constraint::new(2, (2, 2), 2),
-        ];
+        let constraints = vec![Constraint::new(1, (1, 1), 1), Constraint::new(2, (2, 2), 2)];
         let astar = AStar::with_constraints(&grid, &constraints, 0);
         assert!(astar.vertex_constraints.is_empty());
         assert!(astar.edge_constraints.is_empty());
@@ -529,10 +584,7 @@ mod tests {
     #[test]
     fn test_path_with_constraints() {
         let grid = Grid::new(5, 5);
-        let constraints = vec![
-            Constraint::new(0, (1, 0), 1),
-            Constraint::new(0, (2, 0), 2),
-        ];
+        let constraints = vec![Constraint::new(0, (1, 0), 1), Constraint::new(0, (2, 0), 2)];
 
         let astar = AStar::with_constraints(&grid, &constraints, 0);
         let start = Point::new(0.0, 0.0);
@@ -640,10 +692,7 @@ mod tests {
     #[test]
     fn test_find_single_agent_path_with_constraints() {
         let grid = Grid::new(10, 10);
-        let constraints = vec![
-            Constraint::new(0, (1, 0), 1),
-            Constraint::new(0, (0, 1), 1),
-        ];
+        let constraints = vec![Constraint::new(0, (1, 0), 1), Constraint::new(0, (0, 1), 1)];
 
         let start = Point::new(0.0, 0.0);
         let goal = Point::new(5.0, 5.0);
@@ -702,5 +751,38 @@ mod tests {
 
         let path = astar.find_path(start, goal, 0, Some(500));
         assert!(path.is_some());
+    }
+
+    #[test]
+    fn test_path_minimizes_turns_among_equal_cost_paths() {
+        // From (0,0) to (5,5) on an empty grid every monotone staircase has
+        // equal length; the turn-penalty tie-break must pick an L-shaped path
+        // with exactly one direction change instead of a zig-zag.
+        let grid = Grid::new(10, 10);
+        let astar = AStar::new(&grid);
+        let path = astar
+            .find_path(Point::new(0.0, 0.0), Point::new(5.0, 5.0), 0, Some(100))
+            .unwrap();
+        assert_eq!(path.len(), 11, "Path should be optimal length");
+
+        let mut turns = 0;
+        let mut prev_dir: Option<(i32, i32)> = None;
+        for window in path.windows(2) {
+            let dir = (
+                (window[1].x - window[0].x).round() as i32,
+                (window[1].y - window[0].y).round() as i32,
+            );
+            if let Some(p) = prev_dir {
+                if p != dir {
+                    turns += 1;
+                }
+            }
+            prev_dir = Some(dir);
+        }
+        assert_eq!(
+            turns, 1,
+            "Equal-cost path should have minimal turns, got {}",
+            turns
+        );
     }
 }
