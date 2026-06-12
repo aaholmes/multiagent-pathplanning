@@ -51,6 +51,10 @@ class Simulator:
         self.max_time = sim_params.get('max_time', 100.0)
         self.time_horizon = sim_params.get('time_horizon', 2.0)
         self.neighbor_distance = sim_params.get('neighbor_distance', 10.0)
+        # ORCA-only mode (the setup of the original ORCA paper's experiments):
+        # no global planner, each agent's preferred velocity points straight
+        # at its goal and ORCA alone resolves all interactions.
+        self.use_global_planner = sim_params.get('use_global_planner', True)
         
         # Global paths (computed once)
         self.global_paths: Optional[Dict[int, List[navigation_core.Point]]] = None
@@ -62,6 +66,10 @@ class Simulator:
         
     def compute_global_paths(self) -> bool:
         """Compute global paths using CBS."""
+        if not self.use_global_planner:
+            print("ORCA-only mode: skipping global planning")
+            self.global_paths = None
+            return True
         print("Computing global paths with CBS...")
         self.global_paths = navigation_core.solve_cbs_py(self.grid, self.tasks)
         
@@ -75,6 +83,16 @@ class Simulator:
         
         return True
     
+    def _straight_to_goal(self, agent: navigation_core.AgentState) -> navigation_core.Vector2D:
+        """Preferred velocity pointing directly at the goal (ORCA-only mode)."""
+        task = next((t for t in self.tasks if t.agent_id == agent.id), None)
+        if task is None:
+            return navigation_core.Vector2D(0.0, 0.0)
+        direction = task.goal - agent.position
+        if direction.magnitude() < 0.2:
+            return navigation_core.Vector2D(0.0, 0.0)
+        return direction.normalize() * (agent.max_speed * 0.8)
+
     def _has_line_of_sight(self, a: navigation_core.Point, b: navigation_core.Point) -> bool:
         """True if the straight segment a->b stays clear of obstacle cells."""
         delta = b - a
@@ -100,6 +118,8 @@ class Simulator:
         every intermediate cell.
         """
         if self.global_paths is None or agent.id not in self.global_paths:
+            if not self.use_global_planner:
+                return self._straight_to_goal(agent)
             return navigation_core.Vector2D(0.0, 0.0)
 
         path = self.global_paths[agent.id]

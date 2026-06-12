@@ -8,6 +8,25 @@ path planning with real-time, reactive collision avoidance.
 The solver is written in Rust for performance and is wrapped in a Python API
 for easy use in simulations and other applications.
 
+## Demo
+
+Six agents navigating a maze, and four agents crossing paths. The **dashed
+lines** are the CBS global plans; solid trails are the executed trajectories.
+When an agent's velocity is being actively deflected away from its preferred
+path-following velocity, a **red ring** appears around it and a gray arrow
+shows the velocity it *wanted* — that's ORCA at work:
+
+![Complex maze demo](docs/assets/complex_maze.gif)
+
+![4-agent crossing demo](docs/assets/4_agents_crossing.gif)
+
+And the signature experiment from the ORCA paper (van den Berg et al. 2011):
+twelve agents on a circle, each heading to the antipodal point, with **no
+global planner at all** — pure ORCA resolves the 12-way encounter into the
+characteristic rotating vortex:
+
+![ORCA circle experiment](docs/assets/circle_12_agents.gif)
+
 ## Core Concepts: A Two-Layer Architecture
 
 A robust navigation system needs to operate on two levels: long-term strategy
@@ -32,14 +51,15 @@ neighbor and selects the safe velocity closest to its preferred velocity.
 This lets agents gracefully handle dynamic situations and minor deviations
 from their paths.
 
-Instead of the original paper's incremental linear programming, this
-implementation solves the velocity selection as an explicit quadratic program
-with the OSQP solver, with a relaxation LP and a deterministic sampling
-fallback for infeasible (densely crowded) cases, and deterministic bilateral
-symmetry breaking to resolve head-on deadlocks without randomness.
+Velocity selection uses the paper's exact incremental geometric linear
+program (~1 microsecond per agent, no external solver), with the
+max-violation relaxation pass for infeasible dense crowds and deterministic
+bilateral symmetry breaking to resolve head-on deadlocks without randomness.
 
-Note: the local layer avoids other agents only; static obstacles are handled
-by the global planner.
+The local layer is obstacle-aware: grid obstacle cells become hard ORCA
+half-plane constraints (with the agent taking full responsibility, since
+walls don't reciprocate), so local avoidance maneuvers cannot push an agent
+through a wall.
 
 ## Features
 
@@ -47,8 +67,9 @@ by the global planner.
 - **Python integration**: PyO3 bindings plus a simulation/visualization layer
 - **Simulation suite**: scenario loading/generation, statistics, matplotlib
   visualization and animation export
-- **Tested**: 170+ Rust unit and integration tests, including optimality and
-  collision-avoidance regression tests; CI runs build, tests, and lints
+- **Tested**: 170+ Rust tests plus a Python pytest suite, including
+  optimality and collision-avoidance regression tests; CI runs build, tests,
+  and lints
 
 ## Quick Start
 
@@ -104,7 +125,7 @@ multiagent-pathplanning/
 │   ├── structs.rs         # Core data structures
 │   ├── astar.rs           # Time-space A* pathfinding
 │   ├── cbs.rs             # Conflict-Based Search
-│   └── orca.rs            # ORCA collision avoidance (OSQP-based QP)
+│   └── orca.rs            # ORCA collision avoidance (geometric LP)
 ├── simulation/            # Python simulation layer
 │   ├── simulator.py       # Core simulation engine
 │   ├── visualizer.py      # Visualization system
@@ -178,7 +199,7 @@ ScenarioLoader.save_to_file(config, "my_scenario.json")
 cargo test
 
 # Python tests (require the built extension; see Installation)
-python tests/test_structure.py        # repo structure checks only
+pytest tests/test_python_layer.py
 python tests/test_basic_functionality.py
 ```
 
@@ -196,6 +217,12 @@ python benchmark.py --cbs-only
 The ORCA benchmark feeds each agent its 10 nearest neighbors; the CBS
 scenarios contain genuine crossing conflicts so the constraint-tree search is
 actually exercised.
+
+Several tests and scenarios reproduce examples from the source papers: the
+bottleneck instance of Sharon et al. 2015 Fig. 1 (`test_cbs_paper_bottleneck_example`
+asserts the optimal one-step-behind solution) and the ORCA circle-swap
+experiment (`scenarios/circle_12_agents.json`, run ORCA-only via
+`"use_global_planner": false`).
 
 ## License
 

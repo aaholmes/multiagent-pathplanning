@@ -35,6 +35,8 @@ def run_simulation_with_visualization(config_or_scenario, real_time=False, save_
 
     if real_time:
         def step_callback(state):
+            if not visualizer.planned_path_lines and simulator.global_paths:
+                visualizer.set_global_paths(simulator.global_paths)
             visualizer.update_visualization(state)
             states_history.append(state)
             time.sleep(0.05)  # Small delay for visualization
@@ -63,6 +65,7 @@ def run_simulation_with_visualization(config_or_scenario, real_time=False, save_
     # Save or show animation
     if save_animation:
         print(f"Creating animation...")
+        visualizer.set_global_paths(simulator.global_paths)
         visualizer.create_animation(states_history, interval=100, save_path=save_animation)
     else:
         print("Creating static visualization (interactive display not available)...")

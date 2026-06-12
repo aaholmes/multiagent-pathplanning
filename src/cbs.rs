@@ -906,4 +906,37 @@ mod tests {
         assert!(cbs.find_first_conflict(&solution).is_none());
         assert_paths_legal(&solution, &grid, &tasks);
     }
+
+    #[test]
+    fn test_cbs_paper_bottleneck_example() {
+        // The motivating example from Sharon et al. 2015 (Fig. 1): two agents
+        // whose only routes funnel through a shared one-cell-wide corridor.
+        // Any optimal solution has one agent following one step behind the
+        // other, so the sum of costs is exactly one more than the two
+        // independent shortest paths.
+        //
+        //   S1 #  #  #  G1        row 0
+        //   .  .  .  .  .         row 1 (the corridor)
+        //   S2 #  #  #  G2        row 2
+        let mut grid = Grid::new(5, 3);
+        for x in 1..4 {
+            grid.set_obstacle(x, 0, true);
+            grid.set_obstacle(x, 2, true);
+        }
+
+        let tasks = vec![
+            Task::new(0, Point::new(0.0, 0.0), Point::new(4.0, 0.0)),
+            Task::new(1, Point::new(0.0, 2.0), Point::new(4.0, 2.0)),
+        ];
+
+        let solution = solve_cbs(grid.clone(), tasks.clone()).expect("solvable");
+        let cbs = ConflictBasedSearch::new(grid.clone(), tasks.clone());
+        assert!(cbs.find_first_conflict(&solution).is_none());
+        assert_paths_legal(&solution, &grid, &tasks);
+
+        // Independent shortest paths are 7 waypoints each (6 moves through
+        // the corridor); sharing the corridor costs exactly one extra step.
+        let total: usize = solution.values().map(|p| p.len()).sum();
+        assert_eq!(total, 15, "one agent must trail exactly one step behind");
+    }
 }

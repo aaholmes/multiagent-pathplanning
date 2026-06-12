@@ -35,9 +35,12 @@ class Visualizer:
         # Visualization elements
         self.agent_circles = {}
         self.agent_velocity_arrows = {}
+        self.agent_pref_arrows = {}
+        self.agent_orca_halos = {}
         self.agent_trails = {}
         self.goal_markers = {}
         self.obstacle_patches = []
+        self.planned_path_lines = []
         
         # Animation
         self.animation = None
@@ -76,6 +79,32 @@ class Visualizer:
         if len(self.config.agents) <= 5:
             self.ax.legend(loc='upper left', bbox_to_anchor=(1, 1))
     
+    def set_global_paths(self, global_paths):
+        """Draw the CBS-planned paths as dashed lines (the global layer).
+
+        The solid trails drawn during the run are the executed ORCA
+        trajectories; the gap between dashed and solid is the local layer
+        at work.
+        """
+        for line in self.planned_path_lines:
+            line.remove()
+        self.planned_path_lines = []
+        if not global_paths:
+            return
+        for agent_id, path in global_paths.items():
+            if len(path) < 2:
+                continue
+            color = self.colors[agent_id % len(self.colors)]
+            xs = [p.x for p in path]
+            ys = [p.y for p in path]
+            line, = self.ax.plot(
+                xs, ys, linestyle='--', color=color, alpha=0.45,
+                linewidth=1.5, zorder=1,
+                label='CBS plan' if not self.planned_path_lines else None,
+            )
+            self.planned_path_lines.append(line)
+        self.ax.legend(loc='upper left', bbox_to_anchor=(1, 1))
+
     def update_visualization(self, state: SimulationState):
         """Update visualization with current simulation state."""
         # Clear previous agent visualizations
@@ -83,11 +112,17 @@ class Visualizer:
             circle.remove()
         for arrow in self.agent_velocity_arrows.values():
             arrow.remove()
+        for arrow in self.agent_pref_arrows.values():
+            arrow.remove()
+        for halo in self.agent_orca_halos.values():
+            halo.remove()
         for trail in self.agent_trails.values():
             trail.remove()
-        
+
         self.agent_circles.clear()
         self.agent_velocity_arrows.clear()
+        self.agent_pref_arrows.clear()
+        self.agent_orca_halos.clear()
         self.agent_trails.clear()
         
         # Draw agents
@@ -105,13 +140,39 @@ class Visualizer:
             self.ax.add_patch(circle)
             self.agent_circles[agent.id] = circle
             
-            # Velocity arrow
+            # ORCA activity: the local layer is actively constraining this
+            # agent when its executed velocity deviates from the preferred
+            # (path-following) velocity. Show a red halo plus the "wanted"
+            # velocity in gray so the deflection is visible.
+            deviation = (agent.velocity - agent.pref_velocity).magnitude()
+            orca_active = deviation > 0.15 * max(agent.max_speed, 1e-9)
+
+            if orca_active:
+                halo = patches.Circle(
+                    (agent.position.x, agent.position.y),
+                    agent.radius * 1.45,
+                    facecolor='none', edgecolor='red',
+                    linewidth=2.0, alpha=0.9, zorder=4,
+                )
+                self.ax.add_patch(halo)
+                self.agent_orca_halos[agent.id] = halo
+
+                if agent.pref_velocity.magnitude() > 0.01:
+                    pref_arrow = self.ax.arrow(
+                        agent.position.x, agent.position.y,
+                        agent.pref_velocity.x * 0.3, agent.pref_velocity.y * 0.3,
+                        head_width=0.08, head_length=0.08,
+                        fc='gray', ec='gray', alpha=0.7, zorder=4,
+                    )
+                    self.agent_pref_arrows[agent.id] = pref_arrow
+
+            # Executed velocity arrow
             if agent.velocity.magnitude() > 0.01:
                 arrow = self.ax.arrow(
                     agent.position.x, agent.position.y,
                     agent.velocity.x * 0.3, agent.velocity.y * 0.3,
                     head_width=0.1, head_length=0.1,
-                    fc=color, ec=color, alpha=0.8
+                    fc=color, ec=color, alpha=0.8, zorder=5,
                 )
                 self.agent_velocity_arrows[agent.id] = arrow
             
@@ -124,8 +185,12 @@ class Visualizer:
                 trail, = self.ax.plot(x_coords, y_coords, color=color, alpha=0.5, linewidth=2)
                 self.agent_trails[agent.id] = trail
         
-        # Update title with time information
-        self.ax.set_title(f'Multi-Agent Navigation - Time: {state.time:.2f}s')
+        # Update title with time and ORCA activity information
+        n_active = len(self.agent_orca_halos)
+        self.ax.set_title(
+            f'Multi-Agent Navigation - Time: {state.time:.2f}s    '
+            f'(dashed = CBS plan, red ring = ORCA deflecting, {n_active} active)'
+        )
         
         # Refresh display
         self.fig.canvas.draw()

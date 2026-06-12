@@ -24,6 +24,8 @@ SCENARIOS = [
     "scenarios/simple_2_agents.json",
     "scenarios/4_agents_crossing.json",
     "scenarios/complex_maze.json",
+    # The circle-swap experiment from the ORCA paper (ORCA-only, no CBS)
+    "scenarios/circle_12_agents.json",
 ]
 
 
