@@ -21,8 +21,7 @@ use std::collections::HashMap;
 mod structs;
 mod astar;
 mod cbs;
-mod orca;          // Correct ORCA from original paper with QP optimization
-mod orca_simple;   // Simple greedy projection (approximate but faster)
+mod orca;
 
 use structs::*;
 use cbs::solve_cbs;

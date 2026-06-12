@@ -28,25 +28,18 @@
 //! A key challenge in ORCA is the **symmetry deadlock** problem:
 //! When two agents face each other head-on with symmetric velocities,
 //! both compute identical ORCA half-planes. Without intervention,
-//! both would choose the same evasive direction and collide anyway.
+//! both would slow to a crawl, mirroring each other indefinitely.
 //!
-//! **Solution:** Bilateral symmetry breaking using agent IDs
-//! - Each agent pair is ordered by ID (agent i < agent j)
-//! - The lower-ID agent receives a slight perturbation to prefer going RIGHT
-//! - The higher-ID agent receives a slight perturbation to prefer going LEFT
-//! - This ensures consistent, complementary evasive maneuvers
+//! **Solution:** Bilateral perturbation in a shared reference frame.
+//! When a closing pair's correction vector `u` is near zero (the relative
+//! velocity sits on the VO boundary), `u` is replaced by a small vector
+//! perpendicular to the relative position. Because the relative position
+//! flips sign between the two agents of a pair, each agent perturbs in the
+//! opposite lateral direction, producing complementary evasive maneuvers
+//! without randomness or ID coordination.
 //!
-//! **Implementation:**
-//! ```ignore
-//! let perturb = perpendicular_to_relative_velocity * PERTURBATION_EPSILON;
-//! if agent.id < neighbor.id {
-//!     // Prefer right (positive perturbation)
-//!     orca_line.point += perturb;
-//! } else {
-//!     // Prefer left (negative perturbation)
-//!     orca_line.point -= perturb;
-//! }
-//! ```
+//! The perturbation only applies when the agents are actually closing
+//! (`v_rel · p_rel > 0`); diverging or passing agents are never perturbed.
 //!
 //! ## Pros and Cons
 //!
@@ -60,14 +53,7 @@
 //! - Computationally more expensive than simple heuristics
 //! - Requires QP solver (OSQP) as a dependency
 //! - Can have numerical issues in extreme crowded scenarios
-//! - Local algorithm: doesn't consider global path planning
-//!
-//! ## Comparison with `orca_simple`
-//!
-//! This module (`orca`) implements the correct algorithm from the paper.
-//! The `orca_simple` module provides a faster but approximate greedy projection
-//! that may not always find the optimal velocity. Use this module when
-//! correctness is important; use `orca_simple` when speed is critical.
+//! - Local algorithm: doesn't consider global path planning or static obstacles
 
 use crate::structs::{AgentState, Vector2D};
 use osqp::{CscMatrix, Problem, Settings};
@@ -127,167 +113,112 @@ pub fn compute_new_velocity(
     solve_3d_linear_program(&orca_lines, agent.max_speed)
 }
 
-/// Computes an ORCA line constraint for agent-agent interaction
+/// Assumed simulation time step for resolving already-overlapping agents.
+/// When agents interpenetrate, the VO is cut off at one time step rather than
+/// the full horizon so the constraint pushes them apart immediately.
+const COLLISION_RESOLUTION_TIME_STEP: f64 = 0.1;
+
+fn det(a: &Vector2D, b: &Vector2D) -> f64 {
+    a.x * b.y - a.y * b.x
+}
+
+/// Computes an ORCA line constraint for agent-agent interaction.
+///
+/// Follows the standard case analysis (van den Berg et al. 2011 / RVO2):
+/// the truncated VO boundary is the near arc of the cutoff disk plus the two
+/// tangent legs. `u` is the vector from the relative velocity to the closest
+/// point on that boundary, and the half-plane normal is the *outward* normal
+/// of the boundary at that point — so agents whose relative velocity is
+/// already outside the VO (no predicted collision) satisfy the constraint
+/// with slack and are not deflected.
 fn compute_orca_line_for_agent(
     agent: &AgentState,
     neighbor: &AgentState,
     time_horizon: f64,
 ) -> Option<OrcaLine> {
-    // Calculate relative state
     let relative_position = neighbor.position - agent.position;
+    let relative_velocity = agent.velocity - neighbor.velocity;
+    let dist_sq = relative_position.dot(&relative_position);
     let combined_radius = agent.radius + neighbor.radius;
-    
-    // Degeneracy check: agents overlapping
-    if relative_position.magnitude() < EPSILON {
+    let combined_radius_sq = combined_radius * combined_radius;
+
+    // Degeneracy check: agents at the same position
+    if dist_sq < EPSILON * EPSILON {
         return None; // Emergency separation needed
     }
-    
-    // Define the truncated Velocity Obstacle (VO) in velocity space
-    let vo_center = relative_position * (1.0 / time_horizon);
-    let vo_radius = combined_radius / time_horizon;
-    
-    // Current relative velocity (this ensures reciprocity)
-    let relative_velocity = agent.velocity - neighbor.velocity;
-    
-    // Find closest point on VO boundary to relative_velocity
-    let closest_point = find_closest_point_on_vo_boundary(relative_velocity, vo_center, vo_radius);
-    
-    // Calculate correction vector
-    let mut u = closest_point - relative_velocity;
-    
-    // --- DETERMINISTIC SYMMETRY-BREAKING PERTURBATION ---
-    // Handle the deadlock/perfect symmetry case where u becomes zero
-    if u.dot(&u) < PERTURBATION_EPSILON * PERTURBATION_EPSILON {
-        // Deadlock detected. The relative velocity is on the VO boundary.
-        // Use relative_position as shared reference frame for bilateral coordination.
-        // This ensures both agents use the same perturbation direction but with opposite effects.
-        
-        let perturb_dir = if relative_position.dot(&relative_position) > EPSILON {
-            // Use perpendicular to relative position vector
-            // This creates a shared reference frame: both agents see the same line,
-            // but agent A goes one way, agent B goes the other way
-            Vector2D::new(-relative_position.y, relative_position.x).normalize()
-        } else if agent.pref_velocity.dot(&agent.pref_velocity) > 0.0 {
-            // Fallback: use perpendicular of preferred velocity
-            Vector2D::new(-agent.pref_velocity.y, agent.pref_velocity.x).normalize()
+
+    let u: Vector2D;
+    let normal: Vector2D;
+
+    if dist_sq > combined_radius_sq {
+        // No current collision: VO is the cutoff disk at p/tau plus tangent legs.
+        let inv_time_horizon = 1.0 / time_horizon;
+        // Vector from the cutoff-disk center to the relative velocity
+        let w = relative_velocity - relative_position * inv_time_horizon;
+        let w_length_sq = w.dot(&w);
+        let dot1 = w.dot(&relative_position);
+
+        if dot1 < 0.0 && dot1 * dot1 > combined_radius_sq * w_length_sq {
+            // Closest boundary point is on the cutoff disk.
+            let w_length = w_length_sq.sqrt();
+            let unit_w = w * (1.0 / w_length);
+            normal = unit_w;
+            u = unit_w * (combined_radius * inv_time_horizon - w_length);
         } else {
-            // Last resort: arbitrary fixed direction
-            Vector2D::new(0.0, 1.0)
-        };
-        
-        // Overwrite the near-zero `u` vector with the tiny perturbation
-        u = perturb_dir * PERTURBATION_EPSILON;
-    }
-    
-    // Normal case: construct ORCA line with correction vector
-    let orca_direction = u.normalize();
-    let orca_point = agent.velocity + u * 0.5;
-    
-    Some(OrcaLine::new(orca_point, orca_direction))
-}
-
-/// Finds the closest point on the boundary of a truncated velocity obstacle
-fn find_closest_point_on_vo_boundary(
-    point: Vector2D,
-    vo_center: Vector2D,
-    vo_radius: f64,
-) -> Vector2D {
-    // Vector from VO center to query point
-    let center_to_point = point - vo_center;
-    let distance_to_center = center_to_point.magnitude();
-    
-    // Case 1: Point is inside or on the disk boundary - project to disk boundary
-    if distance_to_center <= vo_radius {
-        if distance_to_center < EPSILON {
-            // Point is at center - for symmetry breaking, choose direction
-            // perpendicular to vo_center (direction to other agent).
-            // This creates lateral avoidance rather than forward/backward.
-            if vo_center.magnitude() > EPSILON {
-                let perp = Vector2D::new(-vo_center.y, vo_center.x).normalize();
-                return vo_center + perp * vo_radius;
+            // Closest boundary point is on a tangent leg.
+            let leg = (dist_sq - combined_radius_sq).sqrt();
+            let leg_direction = if det(&relative_position, &w) > 0.0 {
+                // Left leg
+                Vector2D::new(
+                    relative_position.x * leg - relative_position.y * combined_radius,
+                    relative_position.x * combined_radius + relative_position.y * leg,
+                ) * (1.0 / dist_sq)
             } else {
-                // VO center at origin, fall back to arbitrary direction
-                return Vector2D::new(vo_radius, 0.0);
-            }
+                // Right leg
+                Vector2D::new(
+                    relative_position.x * leg + relative_position.y * combined_radius,
+                    -relative_position.x * combined_radius + relative_position.y * leg,
+                ) * (-1.0 / dist_sq)
+            };
+            // Project the relative velocity onto the leg
+            let dot2 = relative_velocity.dot(&leg_direction);
+            u = leg_direction * dot2 - relative_velocity;
+            // Feasible side is to the left of the leg direction
+            normal = Vector2D::new(-leg_direction.y, leg_direction.x);
         }
-        // Project to disk edge
-        let direction = center_to_point.normalize();
-        return vo_center + direction * vo_radius;
-    }
-    
-    // Case 2: Point is outside disk - check cone legs
-    
-    // Compute tangent points from origin to disk
-    let distance_sq = vo_center.dot(&vo_center);
-    let distance = distance_sq.sqrt();
-    
-    if distance < EPSILON {
-        // VO center is at origin, no cone
-        let direction = center_to_point.normalize();
-        return vo_center + direction * vo_radius;
-    }
-    
-    // Tangent length from origin to disk
-    let tangent_length_sq = distance_sq - vo_radius * vo_radius;
-    if tangent_length_sq <= 0.0 {
-        // Origin is inside disk (shouldn't happen in practice)
-        let direction = center_to_point.normalize();
-        return vo_center + direction * vo_radius;
-    }
-    
-    let tangent_length = tangent_length_sq.sqrt();
-    
-    // Compute tangent directions
-    let sin_theta = vo_radius / distance;
-    let cos_theta = tangent_length / distance;
-    
-    // Unit vector from origin to VO center
-    let to_center_unit = vo_center.normalize();
-    
-    // Two tangent directions
-    let tangent1 = Vector2D::new(
-        to_center_unit.x * cos_theta - to_center_unit.y * sin_theta,
-        to_center_unit.x * sin_theta + to_center_unit.y * cos_theta,
-    );
-    let tangent2 = Vector2D::new(
-        to_center_unit.x * cos_theta + to_center_unit.y * sin_theta,
-        -to_center_unit.x * sin_theta + to_center_unit.y * cos_theta,
-    );
-    
-    // Find closest point among: disk edge, left leg, right leg
-    let mut closest = vo_center + center_to_point.normalize() * vo_radius;
-    let mut min_distance_sq = (closest - point).dot(&(closest - point));
-    
-    // Check projection onto left tangent leg
-    let proj1 = project_point_onto_ray(point, Vector2D::new(0.0, 0.0), tangent1);
-    let dist1_sq = (proj1 - point).dot(&(proj1 - point));
-    if dist1_sq < min_distance_sq {
-        closest = proj1;
-        min_distance_sq = dist1_sq;
-    }
-    
-    // Check projection onto right tangent leg
-    let proj2 = project_point_onto_ray(point, Vector2D::new(0.0, 0.0), tangent2);
-    let dist2_sq = (proj2 - point).dot(&(proj2 - point));
-    if dist2_sq < min_distance_sq {
-        closest = proj2;
-    }
-    
-    closest
-}
-
-/// Projects a point onto a ray (half-line) starting from origin in given direction
-fn project_point_onto_ray(point: Vector2D, ray_origin: Vector2D, ray_direction: Vector2D) -> Vector2D {
-    let to_point = point - ray_origin;
-    let projection_length = to_point.dot(&ray_direction);
-    
-    if projection_length <= 0.0 {
-        // Projection is behind ray origin
-        ray_origin
     } else {
-        // Projection is on ray
-        ray_origin + ray_direction * projection_length
+        // Agents already overlap: cut off at one time step to separate now.
+        let inv_time_step = 1.0 / COLLISION_RESOLUTION_TIME_STEP;
+        let w = relative_velocity - relative_position * inv_time_step;
+        let w_length = w.magnitude();
+        let unit_w = if w_length > EPSILON {
+            w * (1.0 / w_length)
+        } else {
+            // Relative velocity exactly at the disk center: push apart laterally
+            Vector2D::new(-relative_position.y, relative_position.x).normalize()
+        };
+        normal = unit_w;
+        u = unit_w * (combined_radius * inv_time_step - w_length);
     }
+
+    // --- DETERMINISTIC SYMMETRY-BREAKING PERTURBATION ---
+    // Only for closing pairs whose relative velocity sits on the VO boundary
+    // (the mirror-deadlock case). Diverging or passing agents are never
+    // perturbed.
+    let closing = relative_velocity.dot(&relative_position) > 0.0;
+    let (u, normal) = if closing && u.dot(&u) < PERTURBATION_EPSILON * PERTURBATION_EPSILON {
+        // Use relative_position as a shared reference frame: it flips sign
+        // between the two agents of the pair, so each perturbs the opposite way.
+        let perturb_dir = Vector2D::new(-relative_position.y, relative_position.x).normalize();
+        (perturb_dir * PERTURBATION_EPSILON, perturb_dir)
+    } else {
+        (u, normal)
+    };
+
+    // Each agent takes half the responsibility for avoiding the collision
+    let orca_point = agent.velocity + u * 0.5;
+
+    Some(OrcaLine::new(orca_point, normal))
 }
 
 
@@ -449,13 +380,13 @@ fn solve_3d_linear_program(orca_lines: &[OrcaLine], max_speed: f64) -> Vector2D 
     let mut l_bounds = Vec::new();
     let mut u_bounds = Vec::new();
     
-    // Add ORCA constraints: vx*dx + vy*dy - d >= px*dx + py*dy
-    // Rearranged: -vx*dx - vy*dy + d <= -px*dx - py*dy
+    // Add relaxed ORCA constraints: v·dir + d >= p·dir, i.e. the slack d
+    // RELAXES each half-plane by up to the worst violation being minimized.
     for line in orca_lines {
-        constraints_a.push([-line.direction.x, -line.direction.y, 1.0]);
-        let rhs = -line.point.dot(&line.direction);
-        l_bounds.push(f64::NEG_INFINITY);
-        u_bounds.push(rhs);
+        constraints_a.push([line.direction.x, line.direction.y, 1.0]);
+        let rhs = line.point.dot(&line.direction);
+        l_bounds.push(rhs);
+        u_bounds.push(f64::INFINITY);
     }
     
     // Add speed constraints using circular approximation (16-sided polygon)
@@ -1014,91 +945,96 @@ mod tests {
         assert!(result.is_some(), "Should produce ORCA line for perpendicular motion");
     }
 
-    // --- Tests for find_closest_point_on_vo_boundary ---
+    // --- Regression tests for the outside-VO half-plane sign ---
+    // (The old construction set the normal to u.normalize() unconditionally,
+    // which is inverted when the relative velocity is outside the VO: agents
+    // NOT on a collision course were stopped or slowed.)
 
     #[test]
-    fn test_find_closest_point_inside_disk() {
-        // Point inside the disk - should project to boundary
-        let vo_center = Vector2D::new(5.0, 0.0);
-        let vo_radius = 2.0;
-        let point = Vector2D::new(5.0, 0.5); // Inside disk
+    fn test_diverging_agents_keep_preferred_velocity() {
+        // Two agents moving directly apart: no predicted collision, so ORCA
+        // must not deflect or slow either of them.
+        let agent = AgentState::new(
+            0,
+            Point::new(0.0, 0.0),
+            Vector2D::new(-1.0, 0.0), // Moving left, away from neighbor
+            0.5,
+            Vector2D::new(-1.0, 0.0),
+            1.0,
+        );
+        let neighbor = AgentState::new(
+            1,
+            Point::new(5.0, 0.0),
+            Vector2D::new(1.0, 0.0), // Moving right, away from agent
+            0.5,
+            Vector2D::new(1.0, 0.0),
+            1.0,
+        );
 
-        let closest = find_closest_point_on_vo_boundary(point, vo_center, vo_radius);
-
-        // Should be on the disk boundary
-        let dist_to_center = (closest - vo_center).magnitude();
-        assert!((dist_to_center - vo_radius).abs() < 0.01,
-            "Closest point should be on disk boundary, got dist {}", dist_to_center);
+        let result = compute_new_velocity(&agent, &[&neighbor], 2.0);
+        assert!(
+            (result - agent.pref_velocity).magnitude() < 0.05,
+            "Diverging agent should keep its preferred velocity, got {:?}",
+            result
+        );
     }
 
     #[test]
-    fn test_find_closest_point_at_center() {
-        // Point exactly at center - should pick a consistent direction
-        let vo_center = Vector2D::new(5.0, 0.0);
-        let vo_radius = 2.0;
-        let point = vo_center; // At center
+    fn test_distant_stationary_neighbor_does_not_slow_agent() {
+        // An agent passing well clear of a stationary neighbor must not be slowed.
+        let agent = AgentState::new(
+            0,
+            Point::new(0.0, 0.0),
+            Vector2D::new(1.0, 0.0),
+            0.5,
+            Vector2D::new(1.0, 0.0),
+            1.0,
+        );
+        let neighbor = AgentState::new(
+            1,
+            Point::new(0.0, 8.0), // 8 units away, perpendicular to motion
+            Vector2D::new(0.0, 0.0),
+            0.5,
+            Vector2D::new(0.0, 0.0),
+            1.0,
+        );
 
-        let closest = find_closest_point_on_vo_boundary(point, vo_center, vo_radius);
-
-        // Should be on the disk boundary
-        let dist_to_center = (closest - vo_center).magnitude();
-        assert!((dist_to_center - vo_radius).abs() < 0.01,
-            "Closest point should be on disk boundary");
+        let result = compute_new_velocity(&agent, &[&neighbor], 2.0);
+        assert!(
+            (result - agent.pref_velocity).magnitude() < 0.05,
+            "Agent passing a distant neighbor should keep its preferred velocity, got {:?}",
+            result
+        );
     }
 
     #[test]
-    fn test_find_closest_point_outside_disk() {
-        // Point far outside the disk - may project to disk edge or cone leg
-        let vo_center = Vector2D::new(5.0, 0.0);
-        let vo_radius = 1.0;
-        let point = Vector2D::new(10.0, 5.0); // Far outside
+    fn test_orca_line_satisfied_with_slack_when_no_collision_course() {
+        // The current velocity must satisfy the constraint when the relative
+        // velocity is outside the VO (the paper's defining property).
+        let agent = AgentState::new(
+            0,
+            Point::new(0.0, 0.0),
+            Vector2D::new(-1.0, 0.0),
+            0.5,
+            Vector2D::new(-1.0, 0.0),
+            1.0,
+        );
+        let neighbor = AgentState::new(
+            1,
+            Point::new(5.0, 0.0),
+            Vector2D::new(1.0, 0.0),
+            0.5,
+            Vector2D::new(1.0, 0.0),
+            1.0,
+        );
 
-        let closest = find_closest_point_on_vo_boundary(point, vo_center, vo_radius);
-
-        // Result should be a valid point (not NaN or infinite)
-        assert!(closest.x.is_finite() && closest.y.is_finite(),
-            "Closest point should be finite");
-    }
-
-    // --- Tests for project_point_onto_ray ---
-
-    #[test]
-    fn test_project_point_onto_ray_forward() {
-        // Point projects forward onto ray
-        let ray_origin = Vector2D::new(0.0, 0.0);
-        let ray_direction = Vector2D::new(1.0, 0.0);
-        let point = Vector2D::new(5.0, 3.0);
-
-        let projection = project_point_onto_ray(point, ray_origin, ray_direction);
-
-        assert!((projection.x - 5.0).abs() < EPSILON, "X should be 5.0");
-        assert!(projection.y.abs() < EPSILON, "Y should be 0.0");
-    }
-
-    #[test]
-    fn test_project_point_onto_ray_behind() {
-        // Point is behind the ray origin - should return origin
-        let ray_origin = Vector2D::new(0.0, 0.0);
-        let ray_direction = Vector2D::new(1.0, 0.0);
-        let point = Vector2D::new(-5.0, 3.0); // Behind origin
-
-        let projection = project_point_onto_ray(point, ray_origin, ray_direction);
-
-        assert!((projection - ray_origin).magnitude() < EPSILON,
-            "Should return ray origin for point behind ray");
-    }
-
-    #[test]
-    fn test_project_point_onto_ray_on_ray() {
-        // Point is exactly on the ray
-        let ray_origin = Vector2D::new(0.0, 0.0);
-        let ray_direction = Vector2D::new(1.0, 0.0);
-        let point = Vector2D::new(3.0, 0.0); // On ray
-
-        let projection = project_point_onto_ray(point, ray_origin, ray_direction);
-
-        assert!((projection - point).magnitude() < EPSILON,
-            "Projection of point on ray should be the point itself");
+        let line = compute_orca_line_for_agent(&agent, &neighbor, 2.0).unwrap();
+        let slack = (agent.velocity - line.point).dot(&line.direction);
+        assert!(
+            slack >= 0.0,
+            "Current velocity of a non-colliding agent must satisfy its own ORCA constraint, slack = {}",
+            slack
+        );
     }
 
     // --- Tests for solve_2d_quadratic_program ---
