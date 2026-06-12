@@ -1,7 +1,10 @@
 [package]
 name = "navigation_core"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
+description = "Multi-agent pathfinding (CBS) and collision avoidance (ORCA) with Python bindings"
+license = "MIT"
+repository = "https://github.com/aaholmes/multiagent-pathplanning"
 
 [lib]
 name = "navigation_core"
@@ -11,7 +14,3 @@ crate-type = ["cdylib", "rlib"]
 pyo3 = { version = "0.25", features = ["extension-module"] }
 priority-queue = "1.3"
 ordered-float = "4.0"
-osqp = "1.0"
-
-[dev-dependencies]
-approx = "0.5"

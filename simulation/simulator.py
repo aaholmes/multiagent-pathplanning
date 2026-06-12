@@ -5,7 +5,7 @@ Core simulation engine for multi-agent navigation.
 import numpy as np
 from typing import List, Dict, Optional, Tuple, Callable
 import navigation_core
-from .scenario_loader import ScenarioConfig
+from .scenario_loader import ScenarioConfig, ScenarioLoader
 
 
 class SimulationState:
@@ -41,9 +41,9 @@ class Simulator:
     
     def __init__(self, config: ScenarioConfig):
         self.config = config
-        self.grid = self._create_grid()
-        self.tasks = self._create_tasks()
-        self.initial_agents = self._create_agents()
+        self.grid = ScenarioLoader.create_grid_from_config(config)
+        self.tasks = ScenarioLoader.create_tasks_from_config(config)
+        self.initial_agents = ScenarioLoader.create_agent_states_from_config(config)
         
         # Simulation parameters
         sim_params = config.simulation_params
@@ -54,44 +54,12 @@ class Simulator:
         
         # Global paths (computed once)
         self.global_paths: Optional[Dict[int, List[navigation_core.Point]]] = None
+        # Per-agent index of the next waypoint to chase (monotone progress)
+        self._waypoint_progress: Dict[int, int] = {}
         
         # Callbacks
         self.step_callback: Optional[Callable[[SimulationState], None]] = None
         
-    def _create_grid(self) -> navigation_core.Grid:
-        """Create grid from configuration."""
-        grid = navigation_core.Grid(self.config.grid_width, self.config.grid_height)
-        for x, y in self.config.obstacles:
-            grid.set_obstacle(x, y, True)
-        return grid
-    
-    def _create_tasks(self) -> List[navigation_core.Task]:
-        """Create tasks from configuration."""
-        tasks = []
-        for agent_data in self.config.agents:
-            task = navigation_core.Task(
-                agent_data['id'],
-                navigation_core.Point(agent_data['start'][0], agent_data['start'][1]),
-                navigation_core.Point(agent_data['goal'][0], agent_data['goal'][1])
-            )
-            tasks.append(task)
-        return tasks
-    
-    def _create_agents(self) -> List[navigation_core.AgentState]:
-        """Create initial agent states from configuration."""
-        agents = []
-        for agent_data in self.config.agents:
-            agent = navigation_core.AgentState(
-                agent_data['id'],
-                navigation_core.Point(agent_data['start'][0], agent_data['start'][1]),
-                navigation_core.Vector2D(0.0, 0.0),
-                agent_data.get('radius', 0.5),
-                navigation_core.Vector2D(0.0, 0.0),
-                agent_data.get('max_speed', 2.0)
-            )
-            agents.append(agent)
-        return agents
-    
     def compute_global_paths(self) -> bool:
         """Compute global paths using CBS."""
         print("Computing global paths with CBS...")
@@ -108,98 +76,82 @@ class Simulator:
         return True
     
     def _get_preferred_velocity(self, agent: navigation_core.AgentState, current_time: float) -> navigation_core.Vector2D:
-        """Compute preferred velocity for an agent based on its global path."""
+        """Compute preferred velocity for an agent based on its global path.
+
+        Progress along the path is tracked with a monotone waypoint index. A
+        closest-waypoint search would re-target earlier or later detour
+        waypoints whenever ORCA pushes the agent off its path, which can stall
+        an agent indefinitely.
+        """
         if self.global_paths is None or agent.id not in self.global_paths:
             return navigation_core.Vector2D(0.0, 0.0)
-        
+
         path = self.global_paths[agent.id]
-        if len(path) < 2:
+        if not path:
             return navigation_core.Vector2D(0.0, 0.0)
-        
-        # Find the next waypoint to target
-        current_pos = agent.position
-        target_idx = 0
-        
-        # Find the closest waypoint on the path
-        min_distance = float('inf')
-        closest_idx = 0
-        for i, waypoint in enumerate(path):
-            distance = current_pos.distance(waypoint)
-            if distance < min_distance:
-                min_distance = distance
-                closest_idx = i
-        
-        # Target the next waypoint ahead, or the goal if we're close to the closest point
-        if min_distance < 1.5:  # If we're close to a waypoint
-            target_idx = min(closest_idx + 1, len(path) - 1)  # Move to next waypoint
-        else:
-            target_idx = closest_idx  # Head to closest waypoint
-        
-        target = path[target_idx]
-        direction = target - current_pos
-        
-        if direction.magnitude() < 0.2:
-            # Very close to target, look further ahead or stop if at goal
-            if target_idx < len(path) - 1:
-                # Not at goal yet, target next waypoint
-                target = path[target_idx + 1]
-                direction = target - current_pos
-            else:
-                # At final goal, stop
-                return navigation_core.Vector2D(0.0, 0.0)
-        
+
+        # Advance past waypoints the agent has effectively reached
+        idx = self._waypoint_progress.get(agent.id, 0)
+        while idx < len(path) - 1 and agent.position.distance(path[idx]) < 0.6:
+            idx += 1
+        self._waypoint_progress[agent.id] = idx
+
+        target = path[idx]
+        direction = target - agent.position
+
+        # At the final waypoint: stop once close enough
+        if idx == len(path) - 1 and direction.magnitude() < 0.2:
+            return navigation_core.Vector2D(0.0, 0.0)
+
         # Normalize and scale by preferred speed (slightly less than max for smooth motion)
         preferred_speed = agent.max_speed * 0.8
         return direction.normalize() * preferred_speed
-    
-    def _get_neighbors(self, agent: navigation_core.AgentState, all_agents: List[navigation_core.AgentState]) -> List[navigation_core.AgentState]:
-        """Get neighboring agents within sensing range."""
-        neighbors = []
-        for other in all_agents:
-            if other.id != agent.id:
-                distance = agent.distance_to(other)
-                if distance <= self.neighbor_distance:
-                    neighbors.append(other)
-        return neighbors
-    
+
     def step(self, state: SimulationState) -> SimulationState:
         """Perform one simulation step."""
-        new_agents = []
-        
+        # Set each agent's preferred velocity from its global path
         for agent in state.agents:
-            # Compute preferred velocity from global path
-            pref_vel = self._get_preferred_velocity(agent, state.time)
-            agent.pref_velocity = pref_vel
-            
-            # Get neighbors
-            neighbors = self._get_neighbors(agent, state.agents)
-            neighbor_refs = [neighbor for neighbor in neighbors]
-            
-            # Compute safe velocity using ORCA
-            safe_velocity = navigation_core.compute_orca_velocity_py(
-                agent, neighbor_refs, self.time_horizon
-            )
-            
-            # Update agent
-            new_position = agent.position + safe_velocity * self.dt
-            new_agent = navigation_core.AgentState(
+            agent.pref_velocity = self._get_preferred_velocity(agent, state.time)
+
+        # One batched call computes ORCA velocities for all agents, with
+        # neighbor selection and static grid-obstacle constraints in Rust.
+        # Obstacle cells are approximated by discs slightly smaller than the
+        # cell's inscribed circle: grid-legal paths may graze cell boundaries
+        # (a 1-wide gap offers exactly zero clearance to a 0.5-radius agent),
+        # so full-size discs would make legal corridors infeasible.
+        safe_velocities = navigation_core.compute_orca_velocities_py(
+            state.agents,
+            self.time_horizon,
+            self.neighbor_distance,
+            grid=self.grid,
+            obstacle_radius=0.35,
+        )
+
+        new_agents = []
+        for agent, safe_velocity in zip(state.agents, safe_velocities):
+            new_agents.append(navigation_core.AgentState(
                 agent.id,
-                new_position,
+                agent.position + safe_velocity * self.dt,
                 safe_velocity,
                 agent.radius,
-                pref_vel,
-                agent.max_speed
-            )
-            
-            new_agents.append(new_agent)
-        
-        # Create new state
+                agent.pref_velocity,
+                agent.max_speed,
+            ))
+
+        # Create new state with copied trajectory lists. A shallow dict copy
+        # would alias the lists across states, so appending here would
+        # retroactively mutate every previously stored state (which made
+        # animation frames all render the final trajectory).
         new_state = SimulationState(new_agents, state.time + self.dt)
-        new_state.agent_trajectories = state.agent_trajectories.copy()
-        new_state.update_agents(new_agents, 0.0)  # Just update trajectories
-        
+        new_state.agent_trajectories = {
+            agent_id: list(trajectory)
+            for agent_id, trajectory in state.agent_trajectories.items()
+        }
+        for agent in new_agents:
+            new_state.agent_trajectories.setdefault(agent.id, []).append(agent.position)
+
         return new_state
-    
+
     def run(self, max_steps: Optional[int] = None) -> SimulationState:
         """Run the complete simulation."""
         # Compute global paths first
@@ -207,6 +159,7 @@ class Simulator:
             raise RuntimeError("Failed to compute global paths")
         
         # Initialize simulation state
+        self._waypoint_progress = {}
         state = SimulationState(self.initial_agents.copy())
         steps = 0
         max_steps = max_steps or int(self.max_time / self.dt)
@@ -234,7 +187,9 @@ class Simulator:
         print(f"Simulation completed: {steps} steps, {state.time:.2f} time units")
         return state
     
-    def _all_agents_at_goal(self, state: SimulationState, tolerance: float = 1.0) -> bool:
+    def _all_agents_at_goal(self, state: SimulationState, tolerance: float = 0.5) -> bool:
+        # Tolerance matches get_statistics' reached_goal threshold; using a
+        # looser value here ended runs that statistics then scored as failures.
         """Check if all agents have reached their goals."""
         agents_at_goal = 0
         total_agents = len(state.agents)
