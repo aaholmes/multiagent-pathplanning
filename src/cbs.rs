@@ -22,7 +22,7 @@
 use crate::astar::find_single_agent_path;
 use crate::structs::{Grid, Task, Path, Constraint, Conflict, CTNode};
 use ordered_float::OrderedFloat;
-use std::collections::{HashMap, HashSet, BinaryHeap};
+use std::collections::{HashMap, BinaryHeap};
 use std::cmp::Ordering;
 
 pub struct ConflictBasedSearch {
@@ -64,26 +64,16 @@ impl ConflictBasedSearch {
         }
 
         let mut open_list = BinaryHeap::new();
-        let mut closed_list = HashSet::new();
 
         // Create root node with no constraints
         let mut root = CTNode::new();
-        
+
         // Find initial solution for all agents
         if let Some(initial_solution) = self.find_solution(&root.constraints) {
             root.solution = initial_solution;
             root.cost = self.calculate_total_cost(&root.solution);
-            
-            // Check for conflicts
-            if let Some(_conflict) = self.find_first_conflict(&root.solution) {
-                open_list.push(PriorityNode {
-                    node: root,
-                    priority: OrderedFloat(0.0),
-                });
-            } else {
-                // No conflicts, return solution
-                return Some(root.solution);
-            }
+            let priority = OrderedFloat(root.cost as f64);
+            open_list.push(PriorityNode { node: root, priority });
         } else {
             // No initial solution possible
             return None;
@@ -91,36 +81,41 @@ impl ConflictBasedSearch {
 
         while let Some(priority_node) = open_list.pop() {
             let current_node = priority_node.node;
-            let node_hash = self.hash_constraints(&current_node.constraints);
-            if closed_list.contains(&node_hash) {
-                continue;
-            }
-            closed_list.insert(node_hash);
 
-            if let Some(conflict) = self.find_first_conflict(&current_node.solution) {
-                // Create two child nodes with additional constraints
-                let child_nodes = self.generate_child_nodes(&current_node, &conflict);
-                
-                for mut child in child_nodes {
-                    if let Some(solution) = self.find_solution(&child.constraints) {
-                        child.solution = solution;
-                        child.cost = self.calculate_total_cost(&child.solution);
-                        
-                        if self.find_first_conflict(&child.solution).is_none() {
-                            // Found conflict-free solution
-                            return Some(child.solution);
-                        }
-                        
-                        let priority = child.cost as f64;
-                        open_list.push(PriorityNode {
-                            node: child,
-                            priority: OrderedFloat(priority),
-                        });
-                    }
-                }
-            } else {
-                // No conflicts in current solution
+            // Goal test on pop: the popped node has minimum cost in OPEN, so a
+            // conflict-free solution found here is optimal (Sharon et al. 2015).
+            // Testing children at generation instead would forfeit optimality.
+            let Some(conflict) = self.find_first_conflict(&current_node.solution) else {
                 return Some(current_node.solution);
+            };
+
+            // Create two child nodes with additional constraints. Only the
+            // newly-constrained agent needs replanning; the other agents'
+            // paths are unaffected and are reused from the parent.
+            for mut child in self.generate_child_nodes(&current_node, &conflict) {
+                let constrained_agent = child
+                    .constraints
+                    .last()
+                    .expect("child node always adds a constraint")
+                    .agent_id;
+                let Some(task) = self.tasks.iter().find(|t| t.agent_id == constrained_agent)
+                else {
+                    continue;
+                };
+
+                if let Some(path) = find_single_agent_path(
+                    &self.grid,
+                    task.start,
+                    task.goal,
+                    &child.constraints,
+                    constrained_agent,
+                ) {
+                    child.solution = current_node.solution.clone();
+                    child.solution.insert(constrained_agent, path);
+                    child.cost = self.calculate_total_cost(&child.solution);
+                    let priority = OrderedFloat(child.cost as f64);
+                    open_list.push(PriorityNode { node: child, priority });
+                }
             }
         }
 
@@ -148,8 +143,11 @@ impl ConflictBasedSearch {
     }
 
     fn find_first_conflict(&self, solution: &HashMap<usize, Path>) -> Option<Conflict> {
-        let agents: Vec<_> = solution.keys().cloned().collect();
-        
+        // Sort agent IDs: HashMap iteration order is nondeterministic, which
+        // would make conflict selection (and thus returned costs) vary per run.
+        let mut agents: Vec<_> = solution.keys().cloned().collect();
+        agents.sort_unstable();
+
         for i in 0..agents.len() {
             for j in (i + 1)..agents.len() {
                 let agent_a = agents[i];
@@ -205,8 +203,9 @@ impl ConflictBasedSearch {
                     pos_b
                 };
                 
-                if pos_a == prev_pos_b && pos_b == prev_pos_a {
-                    return Some(Conflict::new(agent_a, agent_b, pos_a, t));
+                if pos_a == prev_pos_b && pos_b == prev_pos_a && pos_a != pos_b {
+                    // Swap conflict: A moved prev_pos_a -> pos_a, B the reverse
+                    return Some(Conflict::edge(agent_a, agent_b, pos_a, prev_pos_a, t));
                 }
             }
         }
@@ -215,34 +214,34 @@ impl ConflictBasedSearch {
     }
 
     fn generate_child_nodes(&self, parent: &CTNode, conflict: &Conflict) -> Vec<CTNode> {
-        let mut children = Vec::new();
-        
-        // Child 1: Add constraint for agent A
+        // Each child forbids one agent's side of the conflict, so every
+        // solution survives in at least one branch (required for optimality).
+        let (constraint_a, constraint_b) = match conflict.prev_position {
+            // Vertex conflict: both agents at `position` at `time_step`
+            None => (
+                Constraint::new(conflict.agent_a, conflict.position, conflict.time_step),
+                Constraint::new(conflict.agent_b, conflict.position, conflict.time_step),
+            ),
+            // Edge (swap) conflict: A traversed prev -> position, B the reverse
+            Some(prev) => (
+                Constraint::edge(conflict.agent_a, prev, conflict.position, conflict.time_step),
+                Constraint::edge(conflict.agent_b, conflict.position, prev, conflict.time_step),
+            ),
+        };
+
         let mut constraints_a = parent.constraints.clone();
-        constraints_a.push(Constraint::new(conflict.agent_a, conflict.position, conflict.time_step));
-        children.push(CTNode::with_constraints(constraints_a));
-        
-        // Child 2: Add constraint for agent B
+        constraints_a.push(constraint_a);
         let mut constraints_b = parent.constraints.clone();
-        constraints_b.push(Constraint::new(conflict.agent_b, conflict.position, conflict.time_step));
-        children.push(CTNode::with_constraints(constraints_b));
-        
-        children
+        constraints_b.push(constraint_b);
+
+        vec![
+            CTNode::with_constraints(constraints_a),
+            CTNode::with_constraints(constraints_b),
+        ]
     }
 
     fn calculate_total_cost(&self, solution: &HashMap<usize, Path>) -> usize {
         solution.values().map(|path| path.len()).sum()
-    }
-
-    fn hash_constraints(&self, constraints: &[Constraint]) -> u64 {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-        
-        let mut hasher = DefaultHasher::new();
-        for constraint in constraints {
-            constraint.hash(&mut hasher);
-        }
-        hasher.finish()
     }
 }
 
@@ -561,47 +560,6 @@ mod tests {
         assert_eq!(cbs.calculate_total_cost(&solution), 5);
     }
 
-    // ==================== hash_constraints Tests ====================
-
-    #[test]
-    fn test_hash_constraints_empty() {
-        let grid = Grid::new(10, 10);
-        let cbs = ConflictBasedSearch::new(grid, vec![]);
-
-        let constraints: Vec<Constraint> = vec![];
-        let hash = cbs.hash_constraints(&constraints);
-        // Just verify it doesn't panic and returns a value
-        assert!(hash >= 0);
-    }
-
-    #[test]
-    fn test_hash_constraints_deterministic() {
-        let grid = Grid::new(10, 10);
-        let cbs = ConflictBasedSearch::new(grid, vec![]);
-
-        let constraints = vec![
-            Constraint::new(0, (1, 1), 1),
-            Constraint::new(1, (2, 2), 2),
-        ];
-
-        let hash1 = cbs.hash_constraints(&constraints);
-        let hash2 = cbs.hash_constraints(&constraints);
-        assert_eq!(hash1, hash2);
-    }
-
-    #[test]
-    fn test_hash_constraints_different_for_different_constraints() {
-        let grid = Grid::new(10, 10);
-        let cbs = ConflictBasedSearch::new(grid, vec![]);
-
-        let constraints1 = vec![Constraint::new(0, (1, 1), 1)];
-        let constraints2 = vec![Constraint::new(0, (1, 1), 2)];
-
-        let hash1 = cbs.hash_constraints(&constraints1);
-        let hash2 = cbs.hash_constraints(&constraints2);
-        assert_ne!(hash1, hash2);
-    }
-
     // ==================== solve_cbs Integration Tests ====================
 
     #[test]
@@ -813,5 +771,97 @@ mod tests {
 
         let solution = solution.unwrap();
         assert!(solution.is_empty());
+    }
+
+    // ==================== Correctness Regression Tests ====================
+    // These cover the three CBS defects found in review: suboptimal/
+    // nondeterministic solutions, vacuous edge-conflict constraints, and
+    // non-termination when an agent must delay arrival at its goal.
+
+    /// Asserts that every path is physically legal: starts/ends on the task
+    /// endpoints, every step is a 4-neighbor move or a wait, and no waypoint
+    /// is on an obstacle.
+    fn assert_paths_legal(solution: &HashMap<usize, Path>, grid: &Grid, tasks: &[Task]) {
+        for task in tasks {
+            let path = solution.get(&task.agent_id).expect("missing agent path");
+            assert!(!path.is_empty());
+            assert!(path[0].distance(&task.start) < 0.5, "path must start at task start");
+            assert!(path.last().unwrap().distance(&task.goal) < 0.5, "path must end at task goal");
+            for window in path.windows(2) {
+                let (x0, y0) = (window[0].x.round() as i32, window[0].y.round() as i32);
+                let (x1, y1) = (window[1].x.round() as i32, window[1].y.round() as i32);
+                let step = (x1 - x0).abs() + (y1 - y0).abs();
+                assert!(step <= 1, "step from ({},{}) to ({},{}) is not a 4-neighbor move or wait", x0, y0, x1, y1);
+                assert!(!grid.is_obstacle(x1 as usize, y1 as usize), "path enters obstacle at ({},{})", x1, y1);
+            }
+        }
+    }
+
+    #[test]
+    fn test_cbs_head_on_swap_is_optimal_and_deterministic() {
+        // Two agents swap places on an open 5x5 grid. The optimal resolution
+        // is one agent detouring a single cell: 5 + 7 = 12 total waypoints.
+        // Before the goal-test-on-pop fix this returned 12 or 13 depending on
+        // HashMap iteration order.
+        let grid = Grid::new(5, 5);
+        let tasks = vec![
+            Task::new(0, Point::new(0.0, 0.0), Point::new(4.0, 0.0)),
+            Task::new(1, Point::new(4.0, 0.0), Point::new(0.0, 0.0)),
+        ];
+
+        for _ in 0..5 {
+            let solution = solve_cbs(grid.clone(), tasks.clone()).expect("solvable");
+            let cbs = ConflictBasedSearch::new(grid.clone(), tasks.clone());
+            assert!(cbs.find_first_conflict(&solution).is_none());
+            assert_paths_legal(&solution, &grid, &tasks);
+            let total: usize = solution.values().map(|p| p.len()).sum();
+            assert_eq!(total, 12, "head-on swap must always return the optimal cost");
+        }
+    }
+
+    #[test]
+    fn test_cbs_agent_must_delay_goal_arrival() {
+        // Agent 1 starts on its own goal, directly on agent 0's only route.
+        // It must step aside and return - which requires A* to honor
+        // constraints on the goal cell at times after first arrival.
+        // Before the goal-deadline fix this instance never terminated.
+        let mut grid = Grid::new(4, 2);
+        grid.set_obstacle(0, 1, true);
+        grid.set_obstacle(3, 1, true); // leave (1,1) and (2,1) as side pockets
+
+        let tasks = vec![
+            Task::new(0, Point::new(0.0, 0.0), Point::new(3.0, 0.0)),
+            Task::new(1, Point::new(1.0, 0.0), Point::new(1.0, 0.0)),
+        ];
+
+        let solution = solve_cbs(grid.clone(), tasks.clone()).expect("solvable: agent 1 can step aside");
+        let cbs = ConflictBasedSearch::new(grid.clone(), tasks.clone());
+        assert!(cbs.find_first_conflict(&solution).is_none());
+        assert_paths_legal(&solution, &grid, &tasks);
+        assert!(solution.get(&1).unwrap().len() > 1, "agent 1 must move out of the way");
+    }
+
+    #[test]
+    fn test_cbs_corridor_swap_resolved_with_edge_constraints() {
+        // Head-on swap in a width-1 corridor with a single passing pocket.
+        // The agents meet mid-corridor as an edge conflict; resolving it
+        // requires real edge constraints (a vertex constraint on the second
+        // agent is satisfied by its existing path and changes nothing).
+        let mut grid = Grid::new(5, 2);
+        for x in 0..5 {
+            if x != 2 {
+                grid.set_obstacle(x, 1, true); // only pocket: (2,1)
+            }
+        }
+
+        let tasks = vec![
+            Task::new(0, Point::new(0.0, 0.0), Point::new(4.0, 0.0)),
+            Task::new(1, Point::new(4.0, 0.0), Point::new(0.0, 0.0)),
+        ];
+
+        let solution = solve_cbs(grid.clone(), tasks.clone()).expect("solvable via the pocket");
+        let cbs = ConflictBasedSearch::new(grid.clone(), tasks.clone());
+        assert!(cbs.find_first_conflict(&solution).is_none());
+        assert_paths_legal(&solution, &grid, &tasks);
     }
 }

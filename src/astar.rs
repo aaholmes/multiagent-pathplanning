@@ -32,28 +32,39 @@ impl AStarNode {
     }
 }
 
-pub struct AStar {
-    grid: Grid,
-    constraints: HashSet<(usize, (i32, i32), usize)>, // (agent_id, position, time_step)
+pub struct AStar<'a> {
+    grid: &'a Grid,
+    vertex_constraints: HashSet<((i32, i32), usize)>, // (position, time_step)
+    edge_constraints: HashSet<((i32, i32), (i32, i32), usize)>, // (from, to, arrival time_step)
 }
 
-impl AStar {
-    pub fn new(grid: Grid) -> Self {
+impl<'a> AStar<'a> {
+    pub fn new(grid: &'a Grid) -> Self {
         AStar {
             grid,
-            constraints: HashSet::new(),
+            vertex_constraints: HashSet::new(),
+            edge_constraints: HashSet::new(),
         }
     }
 
-    pub fn with_constraints(grid: Grid, constraints: &[Constraint], agent_id: usize) -> Self {
-        let mut astar = AStar::new(grid);
+    pub fn with_constraints(grid: &'a Grid, constraints: &[Constraint], agent_id: usize) -> Self {
+        let mut astar = AStar::new(&grid);
         for constraint in constraints {
             if constraint.agent_id == agent_id {
-                astar.constraints.insert((
-                    constraint.agent_id,
-                    constraint.position,
-                    constraint.time_step,
-                ));
+                match constraint.prev_position {
+                    None => {
+                        astar
+                            .vertex_constraints
+                            .insert((constraint.position, constraint.time_step));
+                    }
+                    Some(from) => {
+                        astar.edge_constraints.insert((
+                            from,
+                            constraint.position,
+                            constraint.time_step,
+                        ));
+                    }
+                }
             }
         }
         astar
@@ -63,15 +74,30 @@ impl AStar {
         ((current.0 - goal.0).abs() + (current.1 - goal.1).abs()) as f64
     }
 
-    fn is_constrained(&self, agent_id: usize, position: (i32, i32), time_step: usize) -> bool {
-        self.constraints.contains(&(agent_id, position, time_step))
+    fn is_constrained(&self, from: (i32, i32), to: (i32, i32), time_step: usize) -> bool {
+        self.vertex_constraints.contains(&(to, time_step))
+            || self.edge_constraints.contains(&(from, to, time_step))
+    }
+
+    /// Latest time at which a vertex constraint touches the goal cell.
+    ///
+    /// An agent rests at its goal after arrival, so it may only finish its
+    /// path *after* every constraint on the goal cell has expired; otherwise
+    /// CBS constraints forbidding the goal at later times are unenforceable
+    /// and the high-level search cannot make progress.
+    fn goal_constraint_deadline(&self, goal: (i32, i32)) -> Option<usize> {
+        self.vertex_constraints
+            .iter()
+            .filter(|(pos, _)| *pos == goal)
+            .map(|(_, t)| *t)
+            .max()
     }
 
     pub fn find_path(
         &self,
         start: Point,
         goal: Point,
-        agent_id: usize,
+        _agent_id: usize,
         max_time_steps: Option<usize>,
     ) -> Option<Path> {
         let start_pos = (start.x.round() as i32, start.y.round() as i32);
@@ -84,18 +110,29 @@ impl AStar {
             return None;
         }
 
+        // The agent rests at the goal forever after arriving, so it may only
+        // stop there once every constraint on the goal cell has expired.
+        let goal_deadline = self.goal_constraint_deadline(goal_pos);
+        let goal_reached = |node: &AStarNode| {
+            node.position == goal_pos && goal_deadline.is_none_or(|t| node.time_step > t)
+        };
+
         let mut open_set = PriorityQueue::new();
         let mut came_from: HashMap<AStarNode, AStarNode> = HashMap::new();
         let mut g_score: HashMap<AStarNode, f64> = HashMap::new();
-        let mut f_score: HashMap<AStarNode, f64> = HashMap::new();
 
         let start_node = AStarNode::new(start_pos, 0);
         g_score.insert(start_node.clone(), 0.0);
-        f_score.insert(start_node.clone(), self.heuristic(start_pos, goal_pos));
-        open_set.push(start_node.clone(), Reverse(OrderedFloat(self.heuristic(start_pos, goal_pos))));
+        // Priority orders by f, then by HIGHER g among ties (standard A*
+        // tie-breaking): on a unit-cost grid with a Manhattan heuristic this
+        // avoids flooding the equal-f plateau between start and goal.
+        open_set.push(
+            start_node.clone(),
+            Reverse((OrderedFloat(self.heuristic(start_pos, goal_pos)), Reverse(0usize))),
+        );
 
         while let Some((current_node, _)) = open_set.pop() {
-            if current_node.position == goal_pos {
+            if goal_reached(&current_node) {
                 return Some(self.reconstruct_path(&came_from, &current_node, start, goal));
             }
 
@@ -104,7 +141,7 @@ impl AStar {
             }
 
             let neighbors = self.grid.get_neighbors(current_node.position.0, current_node.position.1);
-            
+
             // Add staying in place as an option
             let mut all_moves = neighbors;
             all_moves.push(current_node.position);
@@ -114,7 +151,7 @@ impl AStar {
                 let next_node = AStarNode::new(next_pos, next_time);
 
                 // Check if this move is constrained
-                if self.is_constrained(agent_id, next_pos, next_time) {
+                if self.is_constrained(current_node.position, next_pos, next_time) {
                     continue;
                 }
 
@@ -124,14 +161,10 @@ impl AStar {
                 if tentative_g_score < *current_g {
                     came_from.insert(next_node.clone(), current_node.clone());
                     g_score.insert(next_node.clone(), tentative_g_score);
-                    
+
                     let h_score = self.heuristic(next_pos, goal_pos);
                     let f = tentative_g_score + h_score;
-                    f_score.insert(next_node.clone(), f);
-
-                    // Add time penalty to encourage faster solutions
-                    let priority = f + (next_time as f64) * 0.01;
-                    open_set.push(next_node, Reverse(OrderedFloat(priority)));
+                    open_set.push(next_node, Reverse((OrderedFloat(f), Reverse(next_time))));
                 }
             }
         }
@@ -171,7 +204,7 @@ pub fn find_single_agent_path(
     constraints: &[Constraint],
     agent_id: usize,
 ) -> Option<Path> {
-    let astar = AStar::with_constraints(grid.clone(), constraints, agent_id);
+    let astar = AStar::with_constraints(&grid, constraints, agent_id);
     astar.find_path(start, goal, agent_id, Some(500))
 }
 
@@ -212,8 +245,9 @@ mod tests {
     #[test]
     fn test_astar_new() {
         let grid = Grid::new(10, 10);
-        let astar = AStar::new(grid);
-        assert!(astar.constraints.is_empty());
+        let astar = AStar::new(&grid);
+        assert!(astar.vertex_constraints.is_empty());
+        assert!(astar.edge_constraints.is_empty());
         assert_eq!(astar.grid.width, 10);
         assert_eq!(astar.grid.height, 10);
     }
@@ -227,8 +261,8 @@ mod tests {
             Constraint::new(1, (3, 3), 3), // Different agent
             Constraint::new(1, (4, 4), 4), // Different agent
         ];
-        let astar = AStar::with_constraints(grid, &constraints, 0);
-        assert_eq!(astar.constraints.len(), 2);
+        let astar = AStar::with_constraints(&grid, &constraints, 0);
+        assert_eq!(astar.vertex_constraints.len(), 2);
     }
 
     #[test]
@@ -238,16 +272,18 @@ mod tests {
             Constraint::new(1, (1, 1), 1),
             Constraint::new(2, (2, 2), 2),
         ];
-        let astar = AStar::with_constraints(grid, &constraints, 0);
-        assert!(astar.constraints.is_empty());
+        let astar = AStar::with_constraints(&grid, &constraints, 0);
+        assert!(astar.vertex_constraints.is_empty());
+        assert!(astar.edge_constraints.is_empty());
     }
 
     #[test]
     fn test_astar_with_empty_constraints() {
         let grid = Grid::new(10, 10);
         let constraints: Vec<Constraint> = vec![];
-        let astar = AStar::with_constraints(grid, &constraints, 0);
-        assert!(astar.constraints.is_empty());
+        let astar = AStar::with_constraints(&grid, &constraints, 0);
+        assert!(astar.vertex_constraints.is_empty());
+        assert!(astar.edge_constraints.is_empty());
     }
 
     // ==================== Heuristic Tests ====================
@@ -255,28 +291,28 @@ mod tests {
     #[test]
     fn test_heuristic_same_position() {
         let grid = Grid::new(10, 10);
-        let astar = AStar::new(grid);
+        let astar = AStar::new(&grid);
         assert_eq!(astar.heuristic((5, 5), (5, 5)), 0.0);
     }
 
     #[test]
     fn test_heuristic_horizontal() {
         let grid = Grid::new(10, 10);
-        let astar = AStar::new(grid);
+        let astar = AStar::new(&grid);
         assert_eq!(astar.heuristic((0, 0), (5, 0)), 5.0);
     }
 
     #[test]
     fn test_heuristic_vertical() {
         let grid = Grid::new(10, 10);
-        let astar = AStar::new(grid);
+        let astar = AStar::new(&grid);
         assert_eq!(astar.heuristic((0, 0), (0, 5)), 5.0);
     }
 
     #[test]
     fn test_heuristic_diagonal() {
         let grid = Grid::new(10, 10);
-        let astar = AStar::new(grid);
+        let astar = AStar::new(&grid);
         // Manhattan distance for diagonal
         assert_eq!(astar.heuristic((0, 0), (3, 4)), 7.0);
     }
@@ -284,34 +320,34 @@ mod tests {
     #[test]
     fn test_heuristic_negative_coords() {
         let grid = Grid::new(10, 10);
-        let astar = AStar::new(grid);
+        let astar = AStar::new(&grid);
         assert_eq!(astar.heuristic((-3, -4), (0, 0)), 7.0);
     }
 
     // ==================== is_constrained Tests ====================
 
     #[test]
-    fn test_is_constrained_true() {
+    fn test_is_constrained_vertex() {
         let grid = Grid::new(10, 10);
         let constraints = vec![Constraint::new(0, (5, 5), 10)];
-        let astar = AStar::with_constraints(grid, &constraints, 0);
-        assert!(astar.is_constrained(0, (5, 5), 10));
+        let astar = AStar::with_constraints(&grid, &constraints, 0);
+        // Vertex constraints forbid arriving at (5,5) at t=10 from anywhere
+        assert!(astar.is_constrained((4, 5), (5, 5), 10));
+        assert!(astar.is_constrained((5, 5), (5, 5), 10)); // waiting in place
+        assert!(!astar.is_constrained((5, 5), (5, 6), 10)); // different cell
+        assert!(!astar.is_constrained((4, 5), (5, 5), 11)); // different time
     }
 
     #[test]
-    fn test_is_constrained_false_wrong_position() {
+    fn test_is_constrained_edge() {
         let grid = Grid::new(10, 10);
-        let constraints = vec![Constraint::new(0, (5, 5), 10)];
-        let astar = AStar::with_constraints(grid, &constraints, 0);
-        assert!(!astar.is_constrained(0, (5, 6), 10));
-    }
-
-    #[test]
-    fn test_is_constrained_false_wrong_time() {
-        let grid = Grid::new(10, 10);
-        let constraints = vec![Constraint::new(0, (5, 5), 10)];
-        let astar = AStar::with_constraints(grid, &constraints, 0);
-        assert!(!astar.is_constrained(0, (5, 5), 11));
+        let constraints = vec![Constraint::edge(0, (4, 5), (5, 5), 10)];
+        let astar = AStar::with_constraints(&grid, &constraints, 0);
+        // Edge constraint forbids only the (4,5) -> (5,5) transition at t=10
+        assert!(astar.is_constrained((4, 5), (5, 5), 10));
+        assert!(!astar.is_constrained((5, 5), (4, 5), 10)); // reverse direction
+        assert!(!astar.is_constrained((6, 5), (5, 5), 10)); // different source
+        assert!(!astar.is_constrained((4, 5), (5, 5), 9)); // different time
     }
 
     // ==================== find_path Basic Tests ====================
@@ -319,7 +355,7 @@ mod tests {
     #[test]
     fn test_simple_path() {
         let grid = Grid::new(5, 5);
-        let astar = AStar::new(grid);
+        let astar = AStar::new(&grid);
 
         let start = Point::new(0.0, 0.0);
         let goal = Point::new(4.0, 4.0);
@@ -335,7 +371,7 @@ mod tests {
     #[test]
     fn test_path_same_start_goal() {
         let grid = Grid::new(5, 5);
-        let astar = AStar::new(grid);
+        let astar = AStar::new(&grid);
 
         let pos = Point::new(2.0, 2.0);
         let path = astar.find_path(pos, pos, 0, Some(100));
@@ -349,7 +385,7 @@ mod tests {
     #[test]
     fn test_path_horizontal() {
         let grid = Grid::new(10, 10);
-        let astar = AStar::new(grid);
+        let astar = AStar::new(&grid);
 
         let start = Point::new(0.0, 5.0);
         let goal = Point::new(9.0, 5.0);
@@ -367,7 +403,7 @@ mod tests {
     #[test]
     fn test_path_vertical() {
         let grid = Grid::new(10, 10);
-        let astar = AStar::new(grid);
+        let astar = AStar::new(&grid);
 
         let start = Point::new(5.0, 0.0);
         let goal = Point::new(5.0, 9.0);
@@ -384,7 +420,7 @@ mod tests {
     #[test]
     fn test_path_invalid_start() {
         let grid = Grid::new(5, 5);
-        let astar = AStar::new(grid);
+        let astar = AStar::new(&grid);
 
         let start = Point::new(-1.0, 0.0);
         let goal = Point::new(4.0, 4.0);
@@ -396,7 +432,7 @@ mod tests {
     #[test]
     fn test_path_invalid_goal() {
         let grid = Grid::new(5, 5);
-        let astar = AStar::new(grid);
+        let astar = AStar::new(&grid);
 
         let start = Point::new(0.0, 0.0);
         let goal = Point::new(10.0, 10.0);
@@ -409,7 +445,7 @@ mod tests {
     fn test_path_start_on_obstacle() {
         let mut grid = Grid::new(5, 5);
         grid.set_obstacle(0, 0, true);
-        let astar = AStar::new(grid);
+        let astar = AStar::new(&grid);
 
         let start = Point::new(0.0, 0.0);
         let goal = Point::new(4.0, 4.0);
@@ -422,7 +458,7 @@ mod tests {
     fn test_path_goal_on_obstacle() {
         let mut grid = Grid::new(5, 5);
         grid.set_obstacle(4, 4, true);
-        let astar = AStar::new(grid);
+        let astar = AStar::new(&grid);
 
         let start = Point::new(0.0, 0.0);
         let goal = Point::new(4.0, 4.0);
@@ -438,7 +474,7 @@ mod tests {
         grid.set_obstacle(3, 3, true);
         grid.set_obstacle(3, 4, true);
         grid.set_obstacle(4, 3, true);
-        let astar = AStar::new(grid);
+        let astar = AStar::new(&grid);
 
         let start = Point::new(0.0, 0.0);
         let goal = Point::new(4.0, 4.0);
@@ -456,7 +492,7 @@ mod tests {
         grid.set_obstacle(2, 1, true);
         grid.set_obstacle(2, 3, true);
 
-        let astar = AStar::new(grid);
+        let astar = AStar::new(&grid);
         let start = Point::new(0.0, 2.0);
         let goal = Point::new(4.0, 2.0);
 
@@ -476,7 +512,7 @@ mod tests {
             grid.set_obstacle(5, y, true);
         }
 
-        let astar = AStar::new(grid);
+        let astar = AStar::new(&grid);
         let start = Point::new(0.0, 5.0);
         let goal = Point::new(9.0, 5.0);
 
@@ -498,7 +534,7 @@ mod tests {
             Constraint::new(0, (2, 0), 2),
         ];
 
-        let astar = AStar::with_constraints(grid, &constraints, 0);
+        let astar = AStar::with_constraints(&grid, &constraints, 0);
         let start = Point::new(0.0, 0.0);
         let goal = Point::new(4.0, 0.0);
 
@@ -520,7 +556,7 @@ mod tests {
             Constraint::new(1, (3, 0), 3),
         ];
 
-        let astar = AStar::with_constraints(grid, &constraints, 0);
+        let astar = AStar::with_constraints(&grid, &constraints, 0);
         let start = Point::new(0.0, 0.0);
         let goal = Point::new(4.0, 0.0);
 
@@ -542,7 +578,7 @@ mod tests {
             Constraint::new(0, (3, 0), 3),
         ];
 
-        let astar = AStar::with_constraints(grid, &constraints, 0);
+        let astar = AStar::with_constraints(&grid, &constraints, 0);
         let start = Point::new(0.0, 0.0);
         let goal = Point::new(4.0, 0.0);
 
@@ -559,7 +595,7 @@ mod tests {
     #[test]
     fn test_path_max_time_exceeded() {
         let grid = Grid::new(10, 10);
-        let astar = AStar::new(grid);
+        let astar = AStar::new(&grid);
 
         let start = Point::new(0.0, 0.0);
         let goal = Point::new(9.0, 9.0);
@@ -573,7 +609,7 @@ mod tests {
     #[test]
     fn test_path_exact_max_time() {
         let grid = Grid::new(5, 1);
-        let astar = AStar::new(grid);
+        let astar = AStar::new(&grid);
 
         let start = Point::new(0.0, 0.0);
         let goal = Point::new(4.0, 0.0);
@@ -637,7 +673,7 @@ mod tests {
     #[test]
     fn test_path_large_grid() {
         let grid = Grid::new(50, 50);
-        let astar = AStar::new(grid);
+        let astar = AStar::new(&grid);
 
         let start = Point::new(0.0, 0.0);
         let goal = Point::new(49.0, 49.0);
@@ -660,7 +696,7 @@ mod tests {
             grid.set_obstacle(15, i, true);
         }
 
-        let astar = AStar::new(grid);
+        let astar = AStar::new(&grid);
         let start = Point::new(0.0, 10.0);
         let goal = Point::new(19.0, 10.0);
 

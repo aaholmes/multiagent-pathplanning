@@ -264,37 +264,83 @@ impl Task {
 
 pub type Path = Vec<Point>;
 
+/// A CBS constraint on a single agent.
+///
+/// - Vertex constraint (`prev_position == None`): the agent may not occupy
+///   `position` at `time_step`.
+/// - Edge constraint (`prev_position == Some(from)`): the agent may not move
+///   from `from` to `position` arriving at `time_step`. Swap conflicts require
+///   edge constraints — a vertex constraint cannot invalidate the second
+///   agent's path (Sharon et al. 2015).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Constraint {
     pub agent_id: usize,
     pub position: (i32, i32),
+    pub prev_position: Option<(i32, i32)>,
     pub time_step: usize,
 }
 
 impl Constraint {
+    /// Vertex constraint: agent may not be at `position` at `time_step`.
     pub fn new(agent_id: usize, position: (i32, i32), time_step: usize) -> Self {
         Constraint {
             agent_id,
             position,
+            prev_position: None,
+            time_step,
+        }
+    }
+
+    /// Edge constraint: agent may not traverse `from -> to`, arriving at `time_step`.
+    pub fn edge(agent_id: usize, from: (i32, i32), to: (i32, i32), time_step: usize) -> Self {
+        Constraint {
+            agent_id,
+            position: to,
+            prev_position: Some(from),
             time_step,
         }
     }
 }
 
+/// A detected conflict between two agents' paths.
+///
+/// For an edge (swap) conflict, `prev_position` holds agent A's position at
+/// `time_step - 1`: agent A traversed `prev_position -> position` while agent
+/// B traversed `position -> prev_position`. `None` marks a vertex conflict.
 #[derive(Debug, Clone)]
 pub struct Conflict {
     pub agent_a: usize,
     pub agent_b: usize,
     pub position: (i32, i32),
+    pub prev_position: Option<(i32, i32)>,
     pub time_step: usize,
 }
 
 impl Conflict {
+    /// Vertex conflict: both agents at `position` at `time_step`.
     pub fn new(agent_a: usize, agent_b: usize, position: (i32, i32), time_step: usize) -> Self {
         Conflict {
             agent_a,
             agent_b,
             position,
+            prev_position: None,
+            time_step,
+        }
+    }
+
+    /// Edge (swap) conflict: A moved `prev_position -> position`, B the reverse.
+    pub fn edge(
+        agent_a: usize,
+        agent_b: usize,
+        position: (i32, i32),
+        prev_position: (i32, i32),
+        time_step: usize,
+    ) -> Self {
+        Conflict {
+            agent_a,
+            agent_b,
+            position,
+            prev_position: Some(prev_position),
             time_step,
         }
     }
