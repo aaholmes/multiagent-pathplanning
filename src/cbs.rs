@@ -20,10 +20,10 @@
 //! Sharon et al., "Conflict-Based Search for Optimal Multi-Agent Pathfinding" (AAAI 2012)
 
 use crate::astar::find_single_agent_path;
-use crate::structs::{Grid, Task, Path, Constraint, Conflict, CTNode};
+use crate::structs::{CTNode, Conflict, Constraint, Grid, Path, Task};
 use ordered_float::OrderedFloat;
-use std::collections::{HashMap, BinaryHeap};
 use std::cmp::Ordering;
+use std::collections::{BinaryHeap, HashMap};
 
 pub struct ConflictBasedSearch {
     grid: Grid,
@@ -42,21 +42,21 @@ impl ConflictBasedSearch {
             node: CTNode,
             priority: OrderedFloat<f64>,
         }
-        
+
         impl PartialEq for PriorityNode {
             fn eq(&self, other: &Self) -> bool {
                 self.priority == other.priority
             }
         }
-        
+
         impl Eq for PriorityNode {}
-        
+
         impl PartialOrd for PriorityNode {
             fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
                 Some(self.cmp(other))
             }
         }
-        
+
         impl Ord for PriorityNode {
             fn cmp(&self, other: &Self) -> Ordering {
                 other.priority.cmp(&self.priority) // Reverse for min-heap
@@ -73,7 +73,10 @@ impl ConflictBasedSearch {
             root.solution = initial_solution;
             root.cost = self.calculate_total_cost(&root.solution);
             let priority = OrderedFloat(root.cost as f64);
-            open_list.push(PriorityNode { node: root, priority });
+            open_list.push(PriorityNode {
+                node: root,
+                priority,
+            });
         } else {
             // No initial solution possible
             return None;
@@ -98,8 +101,7 @@ impl ConflictBasedSearch {
                     .last()
                     .expect("child node always adds a constraint")
                     .agent_id;
-                let Some(task) = self.tasks.iter().find(|t| t.agent_id == constrained_agent)
-                else {
+                let Some(task) = self.tasks.iter().find(|t| t.agent_id == constrained_agent) else {
                     continue;
                 };
 
@@ -114,7 +116,10 @@ impl ConflictBasedSearch {
                     child.solution.insert(constrained_agent, path);
                     child.cost = self.calculate_total_cost(&child.solution);
                     let priority = OrderedFloat(child.cost as f64);
-                    open_list.push(PriorityNode { node: child, priority });
+                    open_list.push(PriorityNode {
+                        node: child,
+                        priority,
+                    });
                 }
             }
         }
@@ -124,7 +129,7 @@ impl ConflictBasedSearch {
 
     fn find_solution(&self, constraints: &[Constraint]) -> Option<HashMap<usize, Path>> {
         let mut solution = HashMap::new();
-        
+
         for task in &self.tasks {
             if let Some(path) = find_single_agent_path(
                 &self.grid,
@@ -138,7 +143,7 @@ impl ConflictBasedSearch {
                 return None;
             }
         }
-        
+
         Some(solution)
     }
 
@@ -152,21 +157,29 @@ impl ConflictBasedSearch {
             for j in (i + 1)..agents.len() {
                 let agent_a = agents[i];
                 let agent_b = agents[j];
-                
-                if let (Some(path_a), Some(path_b)) = (solution.get(&agent_a), solution.get(&agent_b)) {
+
+                if let (Some(path_a), Some(path_b)) =
+                    (solution.get(&agent_a), solution.get(&agent_b))
+                {
                     if let Some(conflict) = self.detect_conflict(agent_a, path_a, agent_b, path_b) {
                         return Some(conflict);
                     }
                 }
             }
         }
-        
+
         None
     }
 
-    fn detect_conflict(&self, agent_a: usize, path_a: &Path, agent_b: usize, path_b: &Path) -> Option<Conflict> {
+    fn detect_conflict(
+        &self,
+        agent_a: usize,
+        path_a: &Path,
+        agent_b: usize,
+        path_b: &Path,
+    ) -> Option<Conflict> {
         let max_length = path_a.len().max(path_b.len());
-        
+
         for t in 0..max_length {
             let pos_a = if t < path_a.len() {
                 (path_a[t].x.round() as i32, path_a[t].y.round() as i32)
@@ -175,7 +188,7 @@ impl ConflictBasedSearch {
                 let last = path_a.last()?;
                 (last.x.round() as i32, last.y.round() as i32)
             };
-            
+
             let pos_b = if t < path_b.len() {
                 (path_b[t].x.round() as i32, path_b[t].y.round() as i32)
             } else {
@@ -183,33 +196,39 @@ impl ConflictBasedSearch {
                 let last = path_b.last()?;
                 (last.x.round() as i32, last.y.round() as i32)
             };
-            
+
             // Vertex conflict: same position at same time
             if pos_a == pos_b {
                 return Some(Conflict::new(agent_a, agent_b, pos_a, t));
             }
-            
+
             // Edge conflict: agents swap positions
             if t > 0 {
                 let prev_pos_a = if t - 1 < path_a.len() {
-                    (path_a[t - 1].x.round() as i32, path_a[t - 1].y.round() as i32)
+                    (
+                        path_a[t - 1].x.round() as i32,
+                        path_a[t - 1].y.round() as i32,
+                    )
                 } else {
                     pos_a
                 };
-                
+
                 let prev_pos_b = if t - 1 < path_b.len() {
-                    (path_b[t - 1].x.round() as i32, path_b[t - 1].y.round() as i32)
+                    (
+                        path_b[t - 1].x.round() as i32,
+                        path_b[t - 1].y.round() as i32,
+                    )
                 } else {
                     pos_b
                 };
-                
+
                 if pos_a == prev_pos_b && pos_b == prev_pos_a && pos_a != pos_b {
                     // Swap conflict: A moved prev_pos_a -> pos_a, B the reverse
                     return Some(Conflict::edge(agent_a, agent_b, pos_a, prev_pos_a, t));
                 }
             }
         }
-        
+
         None
     }
 
@@ -224,8 +243,18 @@ impl ConflictBasedSearch {
             ),
             // Edge (swap) conflict: A traversed prev -> position, B the reverse
             Some(prev) => (
-                Constraint::edge(conflict.agent_a, prev, conflict.position, conflict.time_step),
-                Constraint::edge(conflict.agent_b, conflict.position, prev, conflict.time_step),
+                Constraint::edge(
+                    conflict.agent_a,
+                    prev,
+                    conflict.position,
+                    conflict.time_step,
+                ),
+                Constraint::edge(
+                    conflict.agent_b,
+                    conflict.position,
+                    prev,
+                    conflict.time_step,
+                ),
             ),
         };
 
@@ -260,9 +289,7 @@ mod tests {
     #[test]
     fn test_cbs_new() {
         let grid = Grid::new(10, 10);
-        let tasks = vec![
-            Task::new(0, Point::new(0.0, 0.0), Point::new(5.0, 5.0)),
-        ];
+        let tasks = vec![Task::new(0, Point::new(0.0, 0.0), Point::new(5.0, 5.0))];
         let cbs = ConflictBasedSearch::new(grid.clone(), tasks.clone());
         assert_eq!(cbs.grid.width, 10);
         assert_eq!(cbs.grid.height, 10);
@@ -282,9 +309,7 @@ mod tests {
     #[test]
     fn test_find_solution_single_agent() {
         let grid = Grid::new(10, 10);
-        let tasks = vec![
-            Task::new(0, Point::new(0.0, 0.0), Point::new(5.0, 5.0)),
-        ];
+        let tasks = vec![Task::new(0, Point::new(0.0, 0.0), Point::new(5.0, 5.0))];
         let cbs = ConflictBasedSearch::new(grid, tasks);
         let constraints: Vec<Constraint> = vec![];
 
@@ -298,14 +323,9 @@ mod tests {
     #[test]
     fn test_find_solution_with_constraints() {
         let grid = Grid::new(10, 10);
-        let tasks = vec![
-            Task::new(0, Point::new(0.0, 0.0), Point::new(5.0, 0.0)),
-        ];
+        let tasks = vec![Task::new(0, Point::new(0.0, 0.0), Point::new(5.0, 0.0))];
         let cbs = ConflictBasedSearch::new(grid, tasks);
-        let constraints = vec![
-            Constraint::new(0, (1, 0), 1),
-            Constraint::new(0, (2, 0), 2),
-        ];
+        let constraints = vec![Constraint::new(0, (1, 0), 1), Constraint::new(0, (2, 0), 2)];
 
         let solution = cbs.find_solution(&constraints);
         assert!(solution.is_some());
@@ -318,9 +338,7 @@ mod tests {
         grid.set_obstacle(1, 0, true);
         grid.set_obstacle(0, 1, true);
 
-        let tasks = vec![
-            Task::new(0, Point::new(0.0, 0.0), Point::new(4.0, 4.0)),
-        ];
+        let tasks = vec![Task::new(0, Point::new(0.0, 0.0), Point::new(4.0, 4.0))];
         let cbs = ConflictBasedSearch::new(grid, tasks);
         let constraints: Vec<Constraint> = vec![];
 
@@ -340,16 +358,22 @@ mod tests {
         let cbs = ConflictBasedSearch::new(grid, tasks);
 
         let mut solution = HashMap::new();
-        solution.insert(0, vec![
-            Point::new(0.0, 0.0),
-            Point::new(1.0, 0.0),
-            Point::new(2.0, 0.0),
-        ]);
-        solution.insert(1, vec![
-            Point::new(0.0, 5.0),
-            Point::new(1.0, 5.0),
-            Point::new(2.0, 5.0),
-        ]);
+        solution.insert(
+            0,
+            vec![
+                Point::new(0.0, 0.0),
+                Point::new(1.0, 0.0),
+                Point::new(2.0, 0.0),
+            ],
+        );
+        solution.insert(
+            1,
+            vec![
+                Point::new(0.0, 5.0),
+                Point::new(1.0, 5.0),
+                Point::new(2.0, 5.0),
+            ],
+        );
 
         assert!(cbs.find_first_conflict(&solution).is_none());
     }
@@ -364,16 +388,22 @@ mod tests {
         let cbs = ConflictBasedSearch::new(grid, tasks);
 
         let mut solution = HashMap::new();
-        solution.insert(0, vec![
-            Point::new(0.0, 0.0),
-            Point::new(1.0, 0.0), // Conflict here
-            Point::new(2.0, 0.0),
-        ]);
-        solution.insert(1, vec![
-            Point::new(2.0, 0.0),
-            Point::new(1.0, 0.0), // Conflict here
-            Point::new(0.0, 0.0),
-        ]);
+        solution.insert(
+            0,
+            vec![
+                Point::new(0.0, 0.0),
+                Point::new(1.0, 0.0), // Conflict here
+                Point::new(2.0, 0.0),
+            ],
+        );
+        solution.insert(
+            1,
+            vec![
+                Point::new(2.0, 0.0),
+                Point::new(1.0, 0.0), // Conflict here
+                Point::new(0.0, 0.0),
+            ],
+        );
 
         let conflict = cbs.find_first_conflict(&solution);
         assert!(conflict.is_some());
@@ -393,14 +423,8 @@ mod tests {
 
         // Agents swap positions
         let mut solution = HashMap::new();
-        solution.insert(0, vec![
-            Point::new(0.0, 0.0),
-            Point::new(1.0, 0.0),
-        ]);
-        solution.insert(1, vec![
-            Point::new(1.0, 0.0),
-            Point::new(0.0, 0.0),
-        ]);
+        solution.insert(0, vec![Point::new(0.0, 0.0), Point::new(1.0, 0.0)]);
+        solution.insert(1, vec![Point::new(1.0, 0.0), Point::new(0.0, 0.0)]);
 
         let conflict = cbs.find_first_conflict(&solution);
         assert!(conflict.is_some());
@@ -413,10 +437,7 @@ mod tests {
         let grid = Grid::new(10, 10);
         let cbs = ConflictBasedSearch::new(grid, vec![]);
 
-        let path_a = vec![
-            Point::new(0.0, 0.0),
-            Point::new(1.0, 0.0),
-        ];
+        let path_a = vec![Point::new(0.0, 0.0), Point::new(1.0, 0.0)];
         let path_b = vec![
             Point::new(2.0, 0.0),
             Point::new(1.0, 0.0), // Same as path_a at t=1
@@ -435,10 +456,7 @@ mod tests {
         let cbs = ConflictBasedSearch::new(grid, vec![]);
 
         // Agent 0 reaches goal early
-        let path_a = vec![
-            Point::new(0.0, 0.0),
-            Point::new(1.0, 0.0),
-        ];
+        let path_a = vec![Point::new(0.0, 0.0), Point::new(1.0, 0.0)];
         // Agent 1 arrives at agent 0's goal later
         let path_b = vec![
             Point::new(3.0, 0.0),
@@ -532,11 +550,14 @@ mod tests {
         let cbs = ConflictBasedSearch::new(grid, vec![]);
 
         let mut solution = HashMap::new();
-        solution.insert(0, vec![
-            Point::new(0.0, 0.0),
-            Point::new(1.0, 0.0),
-            Point::new(2.0, 0.0),
-        ]);
+        solution.insert(
+            0,
+            vec![
+                Point::new(0.0, 0.0),
+                Point::new(1.0, 0.0),
+                Point::new(2.0, 0.0),
+            ],
+        );
 
         assert_eq!(cbs.calculate_total_cost(&solution), 3);
     }
@@ -547,15 +568,15 @@ mod tests {
         let cbs = ConflictBasedSearch::new(grid, vec![]);
 
         let mut solution = HashMap::new();
-        solution.insert(0, vec![
-            Point::new(0.0, 0.0),
-            Point::new(1.0, 0.0),
-        ]); // Cost: 2
-        solution.insert(1, vec![
-            Point::new(0.0, 1.0),
-            Point::new(1.0, 1.0),
-            Point::new(2.0, 1.0),
-        ]); // Cost: 3
+        solution.insert(0, vec![Point::new(0.0, 0.0), Point::new(1.0, 0.0)]); // Cost: 2
+        solution.insert(
+            1,
+            vec![
+                Point::new(0.0, 1.0),
+                Point::new(1.0, 1.0),
+                Point::new(2.0, 1.0),
+            ],
+        ); // Cost: 3
 
         assert_eq!(cbs.calculate_total_cost(&solution), 5);
     }
@@ -616,9 +637,7 @@ mod tests {
     #[test]
     fn test_cbs_single_agent() {
         let grid = Grid::new(10, 10);
-        let tasks = vec![
-            Task::new(0, Point::new(0.0, 0.0), Point::new(5.0, 5.0)),
-        ];
+        let tasks = vec![Task::new(0, Point::new(0.0, 0.0), Point::new(5.0, 5.0))];
 
         let solution = solve_cbs(grid, tasks);
         assert!(solution.is_some());
@@ -728,9 +747,7 @@ mod tests {
     #[test]
     fn test_cbs_same_start_goal() {
         let grid = Grid::new(10, 10);
-        let tasks = vec![
-            Task::new(0, Point::new(5.0, 5.0), Point::new(5.0, 5.0)),
-        ];
+        let tasks = vec![Task::new(0, Point::new(5.0, 5.0), Point::new(5.0, 5.0))];
 
         let solution = solve_cbs(grid, tasks);
         assert!(solution.is_some());
@@ -785,14 +802,32 @@ mod tests {
         for task in tasks {
             let path = solution.get(&task.agent_id).expect("missing agent path");
             assert!(!path.is_empty());
-            assert!(path[0].distance(&task.start) < 0.5, "path must start at task start");
-            assert!(path.last().unwrap().distance(&task.goal) < 0.5, "path must end at task goal");
+            assert!(
+                path[0].distance(&task.start) < 0.5,
+                "path must start at task start"
+            );
+            assert!(
+                path.last().unwrap().distance(&task.goal) < 0.5,
+                "path must end at task goal"
+            );
             for window in path.windows(2) {
                 let (x0, y0) = (window[0].x.round() as i32, window[0].y.round() as i32);
                 let (x1, y1) = (window[1].x.round() as i32, window[1].y.round() as i32);
                 let step = (x1 - x0).abs() + (y1 - y0).abs();
-                assert!(step <= 1, "step from ({},{}) to ({},{}) is not a 4-neighbor move or wait", x0, y0, x1, y1);
-                assert!(!grid.is_obstacle(x1 as usize, y1 as usize), "path enters obstacle at ({},{})", x1, y1);
+                assert!(
+                    step <= 1,
+                    "step from ({},{}) to ({},{}) is not a 4-neighbor move or wait",
+                    x0,
+                    y0,
+                    x1,
+                    y1
+                );
+                assert!(
+                    !grid.is_obstacle(x1 as usize, y1 as usize),
+                    "path enters obstacle at ({},{})",
+                    x1,
+                    y1
+                );
             }
         }
     }
@@ -815,7 +850,10 @@ mod tests {
             assert!(cbs.find_first_conflict(&solution).is_none());
             assert_paths_legal(&solution, &grid, &tasks);
             let total: usize = solution.values().map(|p| p.len()).sum();
-            assert_eq!(total, 12, "head-on swap must always return the optimal cost");
+            assert_eq!(
+                total, 12,
+                "head-on swap must always return the optimal cost"
+            );
         }
     }
 
@@ -834,11 +872,15 @@ mod tests {
             Task::new(1, Point::new(1.0, 0.0), Point::new(1.0, 0.0)),
         ];
 
-        let solution = solve_cbs(grid.clone(), tasks.clone()).expect("solvable: agent 1 can step aside");
+        let solution =
+            solve_cbs(grid.clone(), tasks.clone()).expect("solvable: agent 1 can step aside");
         let cbs = ConflictBasedSearch::new(grid.clone(), tasks.clone());
         assert!(cbs.find_first_conflict(&solution).is_none());
         assert_paths_legal(&solution, &grid, &tasks);
-        assert!(solution.get(&1).unwrap().len() > 1, "agent 1 must move out of the way");
+        assert!(
+            solution.get(&1).unwrap().len() > 1,
+            "agent 1 must move out of the way"
+        );
     }
 
     #[test]

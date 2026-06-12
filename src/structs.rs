@@ -11,7 +11,7 @@
 
 use pyo3::prelude::*;
 use std::collections::HashMap;
-use std::ops::{Add, Sub, Mul};
+use std::ops::{Add, Mul, Sub};
 
 #[pyclass]
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -58,7 +58,7 @@ impl Point {
 
 impl Sub for Point {
     type Output = Vector2D;
-    
+
     fn sub(self, other: Point) -> Vector2D {
         Vector2D {
             x: self.x - other.x,
@@ -69,7 +69,7 @@ impl Sub for Point {
 
 impl Add<Vector2D> for Point {
     type Output = Point;
-    
+
     fn add(self, other: Vector2D) -> Point {
         Point {
             x: self.x + other.x,
@@ -149,7 +149,7 @@ impl Vector2D {
 
 impl Add for Vector2D {
     type Output = Vector2D;
-    
+
     fn add(self, other: Vector2D) -> Vector2D {
         Vector2D {
             x: self.x + other.x,
@@ -160,7 +160,7 @@ impl Add for Vector2D {
 
 impl Sub for Vector2D {
     type Output = Vector2D;
-    
+
     fn sub(self, other: Vector2D) -> Vector2D {
         Vector2D {
             x: self.x - other.x,
@@ -171,7 +171,7 @@ impl Sub for Vector2D {
 
 impl Mul<f64> for Vector2D {
     type Output = Vector2D;
-    
+
     fn mul(self, scalar: f64) -> Vector2D {
         Vector2D {
             x: self.x * scalar,
@@ -225,7 +225,10 @@ impl AgentState {
     pub fn __str__(&self) -> String {
         format!(
             "Agent(id={}, pos={}, vel={}, r={:.2})",
-            self.id, self.position.__str__(), self.velocity.__str__(), self.radius
+            self.id,
+            self.position.__str__(),
+            self.velocity.__str__(),
+            self.radius
         )
     }
 }
@@ -433,13 +436,17 @@ impl Grid {
     }
 
     pub fn is_valid_position(&self, x: i32, y: i32) -> bool {
-        x >= 0 && y >= 0 && (x as usize) < self.width && (y as usize) < self.height && !self.is_obstacle(x as usize, y as usize)
+        x >= 0
+            && y >= 0
+            && (x as usize) < self.width
+            && (y as usize) < self.height
+            && !self.is_obstacle(x as usize, y as usize)
     }
 
     pub fn get_neighbors(&self, x: i32, y: i32) -> Vec<(i32, i32)> {
         let mut neighbors = Vec::new();
         let directions = [(-1, 0), (1, 0), (0, -1), (0, 1)];
-        
+
         for (dx, dy) in directions.iter() {
             let nx = x + dx;
             let ny = y + dy;
@@ -447,7 +454,7 @@ impl Grid {
                 neighbors.push((nx, ny));
             }
         }
-        
+
         neighbors
     }
 
@@ -843,11 +850,7 @@ mod tests {
 
     #[test]
     fn test_task_new() {
-        let task = Task::new(
-            0,
-            Point::new(0.0, 0.0),
-            Point::new(10.0, 10.0),
-        );
+        let task = Task::new(0, Point::new(0.0, 0.0), Point::new(10.0, 10.0));
         assert_eq!(task.agent_id, 0);
         assert_eq!(task.start.x, 0.0);
         assert_eq!(task.start.y, 0.0);
@@ -857,11 +860,7 @@ mod tests {
 
     #[test]
     fn test_task_str() {
-        let task = Task::new(
-            5,
-            Point::new(1.0, 2.0),
-            Point::new(3.0, 4.0),
-        );
+        let task = Task::new(5, Point::new(1.0, 2.0), Point::new(3.0, 4.0));
         let s = task.__str__();
         assert!(s.contains("agent=5"));
         assert!(s.contains("start="));
@@ -920,10 +919,7 @@ mod tests {
 
     #[test]
     fn test_ctnode_with_constraints() {
-        let constraints = vec![
-            Constraint::new(0, (1, 1), 5),
-            Constraint::new(1, (2, 2), 6),
-        ];
+        let constraints = vec![Constraint::new(0, (1, 1), 5), Constraint::new(1, (2, 2), 6)];
         let node = CTNode::with_constraints(constraints.clone());
         assert_eq!(node.constraints.len(), 2);
         assert!(node.solution.is_empty());
@@ -934,10 +930,7 @@ mod tests {
 
     #[test]
     fn test_line_new() {
-        let line = Line::new(
-            Point::new(1.0, 2.0),
-            Vector2D::new(1.0, 0.0),
-        );
+        let line = Line::new(Point::new(1.0, 2.0), Vector2D::new(1.0, 0.0));
         assert_eq!(line.point.x, 1.0);
         assert_eq!(line.point.y, 2.0);
         assert_eq!(line.direction.x, 1.0);
@@ -946,10 +939,7 @@ mod tests {
 
     #[test]
     fn test_line_str() {
-        let line = Line::new(
-            Point::new(1.0, 2.0),
-            Vector2D::new(0.0, 1.0),
-        );
+        let line = Line::new(Point::new(1.0, 2.0), Vector2D::new(0.0, 1.0));
         let s = line.__str__();
         assert!(s.contains("Line"));
         assert!(s.contains("point="));

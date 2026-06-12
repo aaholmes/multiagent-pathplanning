@@ -62,9 +62,19 @@ def benchmark_orca(agent_counts: List[int], iterations: int = 100) -> List[Tuple
             )
             agents.append(agent)
 
+        def nearest_neighbors(agent, k=10):
+            others = [a for a in agents if a.id != agent.id]
+            others.sort(key=lambda a: agent.distance_to(a))
+            return others[:k]
+
+        # Precompute outside the timed loop so the benchmark measures ORCA,
+        # not Python-side sorting. (The previous version took the first 10
+        # agents by index, which made per-call work constant and the
+        # throughput figure flat by construction.)
+        neighbor_lists = [nearest_neighbors(agent) for agent in agents]
+
         # Warm up
-        for agent in agents[:min(10, len(agents))]:
-            neighbors = [a for a in agents if a.id != agent.id][:10]
+        for agent, neighbors in zip(agents[:10], neighbor_lists[:10]):
             nc.compute_orca_velocity_py(agent, neighbors, 2.0)
 
         # Benchmark
@@ -72,9 +82,7 @@ def benchmark_orca(agent_counts: List[int], iterations: int = 100) -> List[Tuple
         start_time = time.perf_counter()
 
         for _ in range(iterations):
-            for agent in agents:
-                # Each agent considers up to 10 nearest neighbors
-                neighbors = [a for a in agents if a.id != agent.id][:10]
+            for agent, neighbors in zip(agents, neighbor_lists):
                 nc.compute_orca_velocity_py(agent, neighbors, 2.0)
                 total_computations += 1
 
@@ -105,15 +113,19 @@ def benchmark_cbs(agent_counts: List[int], grid_size: int = 20) -> List[Tuple[in
     for num_agents in agent_counts:
         grid = nc.Grid(grid_size, grid_size)
 
-        # Create tasks with agents starting on left, goals on right
+        # Agents cross in opposing pairs on shared rows so the constraint
+        # tree is actually exercised. (The previous left-to-right layout was
+        # mutually conflict-free: the "CBS" timing measured k independent A*
+        # runs and never expanded a single constraint-tree node.)
         tasks = []
         for i in range(num_agents):
-            y = i % grid_size
-            start = nc.Point(0.0, float(y))
-            goal = nc.Point(float(grid_size - 1), float((y + num_agents // 2) % grid_size))
+            y = (i // 2) % grid_size
+            if i % 2 == 0:
+                start, goal = nc.Point(0.0, float(y)), nc.Point(float(grid_size - 1), float(y))
+            else:
+                start, goal = nc.Point(float(grid_size - 1), float(y)), nc.Point(0.0, float(y))
             tasks.append(nc.Task(i, start, goal))
 
-        # Benchmark with timeout
         start_time = time.perf_counter()
         try:
             solution = nc.solve_cbs_py(grid, tasks)
@@ -188,7 +200,9 @@ def main():
         orca_iterations = 20
     else:
         orca_agents = [10, 25, 50, 100, 200, 500]
-        cbs_agents = [2, 4, 6, 8, 10, 12]
+        # Crossing conflicts make CBS cost grow steeply with agent count;
+        # 10+ agents takes minutes on vanilla CBS, so the suite stops at 8.
+        cbs_agents = [2, 4, 6, 8]
         orca_iterations = 100
 
     # Run ORCA benchmarks

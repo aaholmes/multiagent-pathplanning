@@ -78,5 +78,7 @@ target/
 *.gif
 *.png
 *.mp4
+!docs/assets/*.gif
+!docs/assets/*.png
 results/
 output/

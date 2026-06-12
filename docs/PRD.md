@@ -1,3 +1,8 @@
+> **Historical note:** this is the original pre-implementation design
+> prompt. The implemented API differs in places (f64 with custom
+> `Vector2D` types, no static-obstacle handling in ORCA); see the
+> README and source for the current design.
+
 # Design Doc
 Project: High-Performance Multi-Robot Navigation Stack (CBS + ORCA)
 

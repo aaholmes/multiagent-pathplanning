@@ -2,72 +2,79 @@
 
 [![CI](https://github.com/aaholmes/multiagent-pathplanning/actions/workflows/ci.yml/badge.svg)](https://github.com/aaholmes/multiagent-pathplanning/actions/workflows/ci.yml)
 
-This project implements a complete, two-layer navigation stack for multi-agent systems, combining optimal global path planning with real-time, reactive collision avoidance.
+A two-layer navigation stack for multi-agent systems, combining optimal global
+path planning with real-time, reactive collision avoidance.
 
-The solver is written in Rust for maximum performance and is wrapped in a Python API for easy use in simulations and other applications.
-
-**Status: Implementation Complete ✅**
-
-The core algorithms for both the global and local planners are implemented in Rust. The Python simulation layer can run complex scenarios and visualize the resulting emergent behavior.
+The solver is written in Rust for performance and is wrapped in a Python API
+for easy use in simulations and other applications.
 
 ## Core Concepts: A Two-Layer Architecture
 
-A robust navigation system needs to operate on two levels: long-term strategy and short-term reflexes. This project implements both.
+A robust navigation system needs to operate on two levels: long-term strategy
+and short-term reflexes. This project implements both.
 
 ### Global Planner: Conflict-Based Search (CBS)
 
-At the global level, this project uses Conflict-Based Search (CBS), a state-of-the-art algorithm that finds the shortest possible set of paths for all agents from their start to goal locations. It acts as the "strategist," providing each agent with a complete, optimal plan assuming a perfect world.
+At the global level, this project uses Conflict-Based Search (CBS), which
+finds a minimum-total-cost set of conflict-free grid paths for all agents. It
+acts as the "strategist," providing each agent with a complete plan assuming
+a perfect world. The implementation follows Sharon et al. (2015): a low-level
+time-expanded A* plans each agent under vertex and edge constraints, and a
+high-level best-first search over a constraint tree branches on conflicts
+until the cheapest conflict-free solution is popped.
 
 ### Local Planner: Optimal Reciprocal Collision Avoidance (ORCA)
 
-At the local level, this project uses Optimal Reciprocal Collision Avoidance (ORCA). ORCA acts as the "reflexes." At every moment, each agent calculates a safe velocity that avoids immediate collisions with its neighbors, while still trying to follow the global plan. This allows agents to gracefully handle dynamic situations and minor deviations from their paths.
+At the local level, this project uses Optimal Reciprocal Collision Avoidance
+(ORCA, van den Berg et al. 2011). ORCA acts as the "reflexes": at every
+moment, each agent computes a half-plane constraint in velocity space per
+neighbor and selects the safe velocity closest to its preferred velocity.
+This lets agents gracefully handle dynamic situations and minor deviations
+from their paths.
 
-By combining CBS and ORCA, this system generates paths that are both globally optimal and locally safe and smooth.
+Instead of the original paper's incremental linear programming, this
+implementation solves the velocity selection as an explicit quadratic program
+with the OSQP solver, with a relaxation LP and a deterministic sampling
+fallback for infeasible (densely crowded) cases, and deterministic bilateral
+symmetry breaking to resolve head-on deadlocks without randomness.
+
+Note: the local layer avoids other agents only; static obstacles are handled
+by the global planner.
 
 ## Features
 
-- **High-Performance Rust Core**: Critical algorithms implemented in Rust for speed
-- **Python Integration**: Easy-to-use Python API with comprehensive bindings
-- **Complete Simulation Suite**: Full simulation environment with visualization
-- **Research-Ready**: Comprehensive testing, statistics, and analysis tools
-- **Flexible Scenarios**: Built-in scenario generators and custom scenario support
-- **Real-time Visualization**: Interactive matplotlib-based visualization
-- **Extensive Documentation**: Well-documented code and API
+- **Rust core**: CBS, time-space A*, and ORCA implemented in Rust
+- **Python integration**: PyO3 bindings plus a simulation/visualization layer
+- **Simulation suite**: scenario loading/generation, statistics, matplotlib
+  visualization and animation export
+- **Tested**: 170+ Rust unit and integration tests, including optimality and
+  collision-avoidance regression tests; CI runs build, tests, and lints
 
 ## Quick Start
 
 ### Prerequisites
 
 - Python 3.8+
-- Rust 1.70+ (for building from source)
+- Rust 1.82+
 - Git
 
 ### Installation
 
-1. **Clone the repository:**
 ```bash
-git clone https://github.com/your-username/multiagent-pathplanning.git
+git clone https://github.com/aaholmes/multiagent-pathplanning.git
 cd multiagent-pathplanning
-```
 
-2. **Set up a Python virtual environment:**
-```bash
 python3 -m venv .venv
 source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-```
 
-3. **Install dependencies and build the Rust library:**
-```bash
 pip install -r requirements.txt
 maturin develop --release
-```
 
-4. **Verify installation:**
-```bash
+# Verify
 python test_basic_import.py
 ```
 
-**Note**: If you encounter any issues, see the detailed [INSTALLATION.md](INSTALLATION.md) guide.
+If you encounter any issues, see the [INSTALLATION.md](INSTALLATION.md) guide.
 
 ### Running Your First Simulation
 
@@ -83,6 +90,9 @@ python simulation/run_simulation.py --scenario scenarios/4_agents_crossing.json 
 
 # Save animation and plots
 python simulation/run_simulation.py --scenario scenarios/complex_maze.json --save-animation results.gif --save-plots results/analysis
+
+# Headless run (no GUI required)
+python run_headless.py --scenario scenarios/simple_2_agents.json
 ```
 
 ## Project Structure
@@ -92,87 +102,33 @@ multiagent-pathplanning/
 ├── src/                    # Rust source code
 │   ├── lib.rs             # Python bindings
 │   ├── structs.rs         # Core data structures
-│   ├── astar.rs           # A* pathfinding
+│   ├── astar.rs           # Time-space A* pathfinding
 │   ├── cbs.rs             # Conflict-Based Search
-│   ├── orca.rs            # ORCA reference implementation
-│   └── orca_correct.rs    # Production ORCA with L2 optimization (used by default)
+│   └── orca.rs            # ORCA collision avoidance (OSQP-based QP)
 ├── simulation/            # Python simulation layer
-│   ├── __init__.py
 │   ├── simulator.py       # Core simulation engine
 │   ├── visualizer.py      # Visualization system
 │   ├── scenario_loader.py # Scenario management
 │   └── run_simulation.py  # Main runner script
 ├── scenarios/             # Example scenarios
-│   ├── simple_2_agents.json
-│   ├── 4_agents_crossing.json
-│   └── complex_maze.json
-├── tests/                 # Test suite
-└── docs/                  # Additional documentation
+├── tests/                 # Python test scripts
+└── docs/                  # Design notes
 ```
 
 ## Core Components
 
 ### 1. Rust Core Library (`navigation_core`)
 
-**Data Structures:**
-- `Point`: 2D coordinate representation
-- `Vector2D`: 2D vector with mathematical operations
-- `AgentState`: Complete agent state (position, velocity, radius, etc.)
-- `Grid`: Environment representation with obstacle support
-- `Task`: Agent start/goal specification
+**Data structures:** `Point`, `Vector2D`, `AgentState`, `Grid`, `Task`
 
 **Algorithms:**
-- **A* Pathfinding**: Single-agent optimal pathfinding with constraints
-- **Conflict-Based Search (CBS)**: Multi-agent optimal path planning
-- **ORCA**: Real-time collision avoidance
+- **A\***: single-agent time-expanded pathfinding under vertex/edge constraints
+- **CBS**: optimal multi-agent path planning
+- **ORCA**: real-time collision avoidance
 
 ### 2. Python Simulation Layer
 
-**Core Classes:**
-- `Simulator`: Main simulation engine
-- `Visualizer`: Real-time and post-processing visualization
-- `ScenarioLoader`: Scenario creation and management
-- `StatisticsVisualizer`: Analysis and plotting tools
-
-## Algorithm Details
-
-### Conflict-Based Search (CBS)
-
-CBS finds optimal paths for multiple agents by:
-1. Computing initial paths for all agents independently
-2. Detecting conflicts between agent paths
-3. Creating constraints to resolve conflicts
-4. Recursively solving subproblems until conflict-free
-
-**Key Features:**
-- Guarantees optimal solutions
-- Handles complex multi-agent scenarios
-- Efficient constraint propagation
-- Complete conflict detection
-
-### Optimal Reciprocal Collision Avoidance (ORCA)
-
-ORCA provides real-time collision avoidance by:
-1. Computing velocity obstacles for each neighboring agent
-2. Constructing half-plane constraints (ORCA lines)
-3. Solving a quadratic program to find the optimal safe velocity closest to the preferred velocity
-4. Ensuring reciprocal collision avoidance through shared responsibility
-
-**Implementation Details:**
-
-This project includes two ORCA implementations:
-- **`orca.rs`**: Reference implementation with basic linear programming
-- **`orca_correct.rs`**: Production implementation (used by default) with advanced features:
-  - **L2 Quadratic Optimization**: Uses OSQP solver to minimize deviation from preferred velocity
-  - **Bilateral Symmetry Breaking**: Deterministic perturbation using relative position as a shared reference frame to resolve deadlocks
-  - **3D Linear Program Fallback**: Graceful handling of infeasible constraint regions
-
-**Key Features:**
-- Smooth, oscillation-free motion
-- Guaranteed collision avoidance
-- Reciprocal behavior assumption
-- Real-time performance (~10,000 agents/second)
-- Deadlock resolution without randomness
+**Core classes:** `Simulator`, `Visualizer`, `ScenarioLoader`, `StatisticsVisualizer`
 
 ## Usage Examples
 
@@ -215,56 +171,15 @@ config = ScenarioLoader.generate_simple_scenario(
 ScenarioLoader.save_to_file(config, "my_scenario.json")
 ```
 
-### Research Analysis
-
-```python
-from simulation import StatisticsVisualizer
-
-# Run multiple trials
-results = []
-for seed in range(10):
-    config = ScenarioLoader.generate_simple_scenario(seed=seed)
-    simulator = Simulator(config)
-    final_state = simulator.run()
-    stats = simulator.get_statistics(final_state)
-    results.append(stats)
-
-# Analyze results
-success_rates = [r['summary']['success_rate'] for r in results]
-print(f"Average success rate: {np.mean(success_rates):.1%}")
-```
-
-## Built-in Scenarios
-
-### Simple Scenarios
-- **simple_2_agents.json**: Two agents passing each other
-- **4_agents_crossing.json**: Four-way intersection scenario
-
-### Complex Scenarios  
-- **complex_maze.json**: Multi-agent navigation in complex environment
-
-### Generated Scenarios
-- **Simple**: Random start/goal with obstacles
-- **Corridor**: Narrow passage with bidirectional traffic
-- **Intersection**: Multi-directional crossing scenario
-
-## Performance Characteristics
-
-- **Rust Core**: ~10,000 agents/second for ORCA computations
-- **Python Integration**: Minimal overhead with efficient bindings
-- **Memory Usage**: Optimized data structures with minimal allocations
-- **Scalability**: Tested with up to 100 agents in complex environments
-
 ## Testing
 
-Run the test suite to verify installation:
-
 ```bash
-# Basic functionality tests (no build required)
-python tests/test_basic_functionality.py
+# Rust unit and integration tests (no Python build required)
+cargo test
 
-# Full integration tests (requires built library)
-cargo test  # Rust unit tests
+# Python tests (require the built extension; see Installation)
+python tests/test_structure.py        # repo structure checks only
+python tests/test_basic_functionality.py
 ```
 
 ## Benchmarking
@@ -272,64 +187,26 @@ cargo test  # Rust unit tests
 Measure algorithm performance on your hardware:
 
 ```bash
-# Run full benchmark suite
-python benchmark.py
-
-# Quick benchmark (fewer iterations)
-python benchmark.py --quick
-
-# Benchmark specific algorithms
+python benchmark.py            # full suite
+python benchmark.py --quick    # fewer iterations
 python benchmark.py --orca-only
 python benchmark.py --cbs-only
 ```
 
-Example output:
-```
-ORCA: 100 agents -> 12,847 velocity computations/sec
-CBS:    8 agents ->   42.31 ms (solved)
-```
-
-## Research Applications
-
-This codebase is designed for:
-
-- **Algorithm Development**: Easy modification and extension of core algorithms
-- **Performance Analysis**: Comprehensive statistics and visualization
-- **Comparative Studies**: Multiple scenario types and metrics
-- **Real-world Deployment**: High-performance core suitable for robotics
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
+The ORCA benchmark feeds each agent its 10 nearest neighbors; the CBS
+scenarios contain genuine crossing conflicts so the constraint-tree search is
+actually exercised.
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## Citation
-
-If you use this code in your research, please cite:
-
-```bibtex
-@software{multiagent_pathplanning,
-  title={High-Performance Multi-Robot Navigation Stack},
-  author={Adam A. Holmes},
-  year={2025},
-  url={https://github.com/aaholmes/multiagent-pathplanning}
-}
-```
+This project is licensed under the MIT License - see the [LICENSE](LICENSE)
+file for details.
 
 ## References
 
-- **CBS**: Sharon, G., Stern, R., Felner, A., & Sturtevant, N. R. (2015). Conflict-based search for optimal multi-agent pathfinding.
-- **ORCA**: Van Den Berg, J., Lin, M., & Manocha, D. (2008). Reciprocal velocity obstacles for real-time multi-agent navigation.
-
-## Acknowledgments
-
-- The multi-agent pathfinding research community
-- Contributors to the RVO2 and CBS implementations
-- The Rust and PyO3 communities for excellent tooling
+- **CBS**: Sharon, G., Stern, R., Felner, A., & Sturtevant, N. R. (2015).
+  Conflict-based search for optimal multi-agent pathfinding. *Artificial
+  Intelligence*, 219, 40-66.
+- **ORCA**: van den Berg, J., Guy, S. J., Lin, M., & Manocha, D. (2011).
+  Reciprocal n-body collision avoidance. *Robotics Research* (ISRR 2009),
+  Springer Tracts in Advanced Robotics, vol 70.

@@ -12,7 +12,7 @@ This guide provides step-by-step instructions for installing the multi-agent nav
 
 ### 1. Clone the Repository
 ```bash
-git clone https://github.com/your-username/multiagent-pathplanning.git
+git clone https://github.com/aaholmes/multiagent-pathplanning.git
 cd multiagent-pathplanning
 ```
 
